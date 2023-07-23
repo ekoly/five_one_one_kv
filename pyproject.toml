@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "five-one-one-kv"
+authors = [
+    {name = "ecowley", email = "ecowley@stromsy.com"},
+]
+description = "Python asyncio worker framework with messaging"
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["key", "value", "kv"]
+license = {text = "MIT License"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+]
+dependencies = []
+dynamic = ["version"]
+
+[tool.setuptools]
+py-modules = ["five_one_one_kv"]

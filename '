@@ -1,0 +1,95 @@
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#include "util.h"
+
+
+void log_error(const char *msg) {
+    fprintf(stderr, "%s\n", msg);
+}
+
+void die(const char *msg) {
+    int err = errno;
+    fprintf(stderr, "[%d] %s\n", err, msg);
+    abort();
+}
+
+int32_t read_full(int fd, char *buff, size_t n) {
+    while (n > 0) {
+        ssize_t rv = read(fd, buff, n);
+        if (rv <= 0) {
+            // error, or unexpected EOF
+            return -1;
+        }
+        n -= (size_t)rv;
+        buff += rv;
+    }
+    return 0;
+}
+
+int32_t write_all(int fd, const char *buff, size_t n) {
+    while (n > 0) {
+        ssize_t rv = write(fd, buff, n);
+        if (rv <= 0) {
+            // error
+            return -1;
+        }
+        n -= (size_t)rv;
+        buff += rv;
+    }
+    return 0;
+}
+
+struct Conn *conn_new(int connfd) {
+
+    struct Conn *conn = (struct Conn *)malloc(sizeof(struct Conn));
+    if (conn == NULL) {
+        close(connfd);
+        return NULL;
+    }
+    conn->fd = connfd;
+    conn->state = STATE_REQ;
+    conn->rbuff_size = 0;
+    conn->rbuff_max = DEFAULT_MSG_SIZE;
+    conn->wbuff_size = 0;
+    conn->wbuff_sent = 0;
+    conn->wbuff_max = DEFAULT_MSG_SIZE;
+
+    conn->rbuff = calloc(DEFAULT_MSG_SIZE, sizeof(uint8_t));
+    conn->wbuff = calloc(DEFAULT_MSG_SIZE, sizeof(uint8_t));
+
+    return conn;
+
+}
+
+int32_t conn_resize_rbuff(struct Conn *conn, uint32_t newsize) {
+
+    uint8_t *newbuff = (uint8_t *)realloc(conn->rbuff, newsize * sizeof(uint8_t));
+    if (!newbuff) {
+        return -1;
+    }
+
+    conn->rbuff = newbuff;
+
+    return 0;
+
+}
+
+int32_t conn_resize_wbuff(struct Conn *conn, size_t newsize) {
+
+    uint8_t *newbuff = (uint8_t *)realloc(conn->wbuff, newsize * sizeof(uint8_t));
+    if (!newbuff) {
+        return -1;
+    }
+
+    conn->wbuff = newbuff;
+
+    return 0;
+
+}
+
+int32_t conn_flush(struct Conn *conn, int flushsize) {
+}
