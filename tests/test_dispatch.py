@@ -1,10 +1,12 @@
 from five_one_one_kv.c import dumps, loads
 
+
 def test_int():
     x = 511
     d = dumps(x)
     l = loads(d)
     assert l == x
+
 
 def test_float():
     x = 3.14159

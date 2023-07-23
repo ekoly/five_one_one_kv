@@ -4,7 +4,7 @@ import socket
 import struct
 from typing import Any, Tuple, Union
 
-from five_one_one_kv.c import dumps, loads, RES_OK, RES_ERR, RES_NX, RES_UNKNOWN
+from five_one_one_kv.c import RES_ERR, RES_NX, RES_OK, RES_UNKNOWN, dumps, loads
 
 
 class ServerError(Exception):
@@ -22,8 +22,10 @@ class NotEnoughDataError(Exception):
 
     pass
 
+
 _SINGLEOFFSET = struct.calcsize("=i")
 _DOUBLEOFFSET = struct.calcsize("=ii")
+
 
 def _pack(*args) -> bytes:
     """
@@ -107,7 +109,7 @@ class Client:
             raise ServerError
         if status == RES_NX:
             raise KeyError
-    
+
     def _looped_recv():
         response = b""
         status = RES_UNKNOWN

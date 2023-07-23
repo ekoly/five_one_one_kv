@@ -1,7 +1,7 @@
-from concurrent.futures import ThreadPoolExecutor
 import logging
 import logging.handlers
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 from five_one_one_kv.c import server
 
@@ -18,10 +18,9 @@ logger.setLevel(logging.DEBUG)
 
 
 class Server:
-
     def __init__(self, port=8513, num_threads=2):
         if num_threads < 2 or num_threads > 16:
-            raise ValueError("num_threads must be in [2, 16]");
+            raise ValueError("num_threads must be in [2, 16]")
         try:
             self._server = server(port=port, num_threads=num_threads)
         except:
@@ -32,6 +31,7 @@ class Server:
             executor.submit(self._server.poll_loop)
             for _ in range(num_threads - 1):
                 executor.submit(self._server.io_loop)
+
 
 if __name__ == "__main__":
     Server()
