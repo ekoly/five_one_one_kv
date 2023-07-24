@@ -1,5 +1,6 @@
-import pytest
 import time
+
+import pytest
 
 from five_one_one_kv import Client, Pipeline
 
@@ -12,7 +13,6 @@ def client():
         except ConnectionRefusedError:
             time.sleep(1.5)
     raise ConnectionRefusedError
-
 
 
 @pytest.fixture(scope="function")

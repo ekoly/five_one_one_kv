@@ -1,6 +1,6 @@
+import io
 import socket
 import struct
-import io
 from typing import Any, Tuple, Union
 
 from five_one_one_kv.c import (
