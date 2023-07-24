@@ -6,7 +6,7 @@ The server is written in C/CPython with a Python wrapper.
 
 The client is written in Python.
 
-Build with:
+Install with:
 ```
 make install
 ```
@@ -16,9 +16,7 @@ Run the server with:
 python -m five_one_one_kv.server
 ```
 
-With the server running, tests may be run with:
+With the server running, run the test suite with:
 ```
 make test
 ```
-
-More documentation coming soon.
