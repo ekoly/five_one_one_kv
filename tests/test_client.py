@@ -25,6 +25,51 @@ def test_overwrite(client):
     assert client.get("foo") is None
 
 
+@pytest.mark.parametrize(
+    ("k",),
+    (
+        ("mel ott homeruns",),
+        (b"buffoon",),
+        (1001,),
+        (2.35813,),
+    ),
+)
+@pytest.mark.parametrize(
+    ("v",),
+    (
+        ("511",),
+        (b"baz",),
+        ("dalmations",),
+        (21.34,),
+        (55,),
+    ),
+)
+def test_types(client, k, v):
+    client[k] = v
+    assert client[k] == v
+    del client[k]
+    assert client.get(k) is None
+
+
+@pytest.mark.parametrize(
+    ("k",),
+    (
+        (
+            [
+                1,
+                2,
+                3,
+            ],
+        ),
+        (True,),
+        (False,),
+    ),
+)
+def test_unhashable_types(client, k):
+    with pytest.raises(TypeError):
+        client[k] = "bar"
+
+
 def test_many(client):
     ops = ("get", "set", "del")
     keysource = ("existing", "nonexisting")

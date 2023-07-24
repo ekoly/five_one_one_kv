@@ -18,12 +18,12 @@ logger.setLevel(logging.DEBUG)
 
 
 class Server:
-    def __init__(self, port=8513, num_threads=2):
+    def __init__(self, port=8513, num_threads=4):
         if num_threads < 2 or num_threads > 16:
             raise ValueError("num_threads must be in [2, 16]")
         try:
             self._server = server(port=port, num_threads=num_threads)
-        except:
+        except Exception:
             logger.exception("server failed to initialize")
             raise
         logger.info("server has initialized")

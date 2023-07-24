@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <semaphore.h>
 
 #include <Python.h>
 
@@ -17,6 +18,8 @@
 #define MAX_KEY_SIZE 1024
 #define MAX_VAL_SIZE MAX_MSG_SIZE - 2048
 #define CEIL(x, y) ((y) * ((x) / (y) + ((x) % (y) != 0)))
+
+#define INTQ_NODE_SIZE 16
 
 // cached python objects
 extern int32_t is_py_deps_init;
@@ -80,12 +83,14 @@ enum {
     STATE_REQ_WAITING = 3,
     STATE_RES_WAITING = 4,
     STATE_END = 5,
+    STATE_TERM = 6,
 };
 
 struct Conn {
     int fd;
     uint32_t state;
     size_t rbuff_size;
+    size_t rbuff_read;
     size_t rbuff_max;
     uint8_t *rbuff;
     size_t wbuff_size;
@@ -93,7 +98,7 @@ struct Conn {
     size_t wbuff_max;
     uint8_t *wbuff;
     int32_t connid;
-    PyObject *lock;
+    sem_t *lock;
 
 };
 
@@ -103,12 +108,17 @@ struct Response {
     int32_t datalen;
 };
 
-enum {
-    RES_OK = 0,
-    RES_ERR = 1,
-    RES_NX = 2,
-    RES_UNKNOWN = 3,
-};
+extern const int RES_OK; // expected result
+extern const int RES_UNKNOWN; // catch-all for unknown errors
+extern const int RES_ERR_SERVER; // server messed up 
+extern const int RES_ERR_CLIENT; // server blames client
+extern const int RES_BAD_CMD; // command not found
+extern const int RES_BAD_TYPE; // type not found
+extern const int RES_BAD_KEY; // key not found
+extern const int RES_BAD_ARGS; // bad args for the command
+extern const int RES_BAD_OP; // bad operation, ex. INC on not int
+extern const int RES_BAD_IX; // index out of bound for list/queue commands
+extern const int RES_BAD_HASH; // index out of bound for list/queue commands
 
 // basic utils
 void log_error(const char *msg);
@@ -126,9 +136,37 @@ int32_t write_all(int fd, const char *buff, size_t n);
 
 // connection management
 struct Conn *conn_new(int connfd);
-int32_t conn_resize_rbuff(struct Conn *conn, uint32_t newsize);
-int32_t conn_resize_wbuff(struct Conn *conn, uint32_t newsize);
-int32_t conn_flush(struct Conn *conn, uint32_t flushsize);
+int32_t conn_rbuff_resize(struct Conn *conn, uint32_t newsize);
+int32_t conn_wbuff_resize(struct Conn *conn, uint32_t newsize);
+int32_t conn_rbuff_flush(struct Conn *conn);
 int32_t conn_write_response(struct Conn *conn, const struct Response *response);
+
+struct intq_node_t {
+    struct intq_node_t *next;
+    int32_t vals[INTQ_NODE_SIZE];
+};
+
+struct intq_t {
+    struct intq_node_t *front;
+    struct intq_node_t *back;
+    int32_t front_ix;
+    int32_t back_ix;
+};
+
+struct intq_t *intq_new();
+void intq_destroy(struct intq_t *intq);
+#define intq_empty(intq) ((intq->front == intq->back) && (intq->front_ix == intq->back_ix))
+int32_t intq_put(struct intq_t *intq, int32_t val);
+int32_t intq_get(struct intq_t *intq);
+
+// equivalent of threading.Condition
+struct cond_t {
+    sem_t acq_lock;
+    sem_t notify_lock;
+};
+
+struct cond_t *cond_new();
+int32_t cond_wait(struct cond_t *cond);
+int32_t cond_notify(struct cond_t *cond);
 
 #endif

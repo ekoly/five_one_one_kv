@@ -1,7 +1,10 @@
 #ifndef _FOO_SERVER_H
 #define _FOO_SERVER_H
 
+#include <semaphore.h>
 #include <Python.h>
+
+#include "util.h"
 
 struct ConnArray {
     int32_t size;
@@ -18,10 +21,11 @@ typedef struct foo_kv_server {
     PyObject *user_locks_lock;
     int fd;
     struct ConnArray *fd_to_conn;
-    PyObject *waiting_conns;
-    PyObject *waiting_conns_lock;
-    PyObject *io_conns_cond;
-    PyObject *io_conns_sem;
+    struct intq_t *waiting_conns;
+    sem_t *waiting_conns_lock;
+    struct cond_t *waiting_conns_ready_cond;
+    sem_t *io_conns_sem; // keeps track of # of active requests
+    int num_threads;
 } foo_kv_server;
 
 // generic utilities

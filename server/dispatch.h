@@ -1,11 +1,12 @@
-#include "util.h"
-#include "server.h"
-
 #ifndef _FOO_DISPATCH_H
 #define _FOO_DISPATCH_H
 
 #include <stdint.h>
 #include <Python.h>
+
+#include "util.h"
+#include "server.h"
+
 
 // the following directives are the hash of our commands
 #define CMD_GET 118508615
@@ -34,5 +35,6 @@ PyObject *_loads_list(const char *x);
 int32_t _threading_lock_acquire(PyObject *lock);
 int32_t _threading_lock_acquire_block(PyObject *lock);
 int32_t _threading_lock_release(PyObject *lock);
+int32_t is_foo_obj_hashable(const uint8_t *x);
 
 #endif

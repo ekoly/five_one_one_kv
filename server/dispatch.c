@@ -77,7 +77,7 @@ struct Response *dispatch(foo_kv_server *server, int32_t connid, const uint8_t *
     int32_t cmd_hash = hash_given_len(subcmds[0], subcmd_to_len[0]);
     int32_t err;
     uint8_t *out;
-    struct Response *response = (struct Response *)malloc(sizeof(struct Response));
+    struct Response *response = calloc(1, sizeof(struct Response));
 
     #if _FOO_KV_DEBUG == 1
     sprintf(debug_buffer, "dispatch(): cmd=%.*s hash=%d", subcmd_to_len[0], subcmds[0], cmd_hash);
@@ -88,64 +88,74 @@ struct Response *dispatch(foo_kv_server *server, int32_t connid, const uint8_t *
         case CMD_GET:
             if (nstrs != 2) {
                 log_error("dispatch(): got invalid number of args to GET");
-                return NULL;
+                response->status = RES_BAD_ARGS;
+                return response;
+            }
+            if (is_foo_obj_hashable(subcmds[1]) == 0) {
+                log_error("dispatch(): got unhashable key GET");
+                response->status = RES_BAD_HASH;
+                return response;
             }
             out = do_get(server, subcmds[1], subcmd_to_len[1]);
             if (!out) {
                 if (PyErr_Occurred()) {
                     PyErr_Clear();
                     log_error("dispatch(): got err from do_get()");
-                    return NULL;
+                    response->status = RES_ERR_SERVER;
+                    return response;
                 }
-                response->status = RES_NX;
-                response->data = NULL;
-                response->datalen = 0;
-            } else {
-                response->status = RES_OK;
-                response->data = out;
-                response->datalen = strlen((char *)out);
+                response->status = RES_BAD_KEY;
+                return response;
             }
-            break;
+            response->status = RES_OK;
+            response->data = out;
+            response->datalen = strlen((char *)out);
+            return response;
         case CMD_PUT:
             if (nstrs != 3) {
                 log_error("dispatch(): got invalid number of args to PUT");
-                return NULL;
+                response->status = RES_BAD_ARGS;
+                return response;
+            }
+            if (is_foo_obj_hashable(subcmds[1]) == 0) {
+                log_error("dispatch(): got unhashable key for PUT");
+                response->status = RES_BAD_HASH;
+                return response;
             }
             err = do_put(server, subcmds[1], subcmd_to_len[1], subcmds[2], subcmd_to_len[2]);
-            if (err == RES_ERR) {
+            if (err) {
                 log_error("dispatch(): got err from do_put()");
-                return NULL;
-            } else {
-                response->status = RES_OK;
-                response->data = NULL;
-                response->datalen = 0;
+                response->status = err;
+                return response;
             }
-            break;
+            response->status = RES_OK;
+            return response;
         case CMD_DEL:
             if (nstrs != 2) {
                 log_error("dispatch(): got invalid number of args to DEL");
-                return NULL;
+                response->status = RES_BAD_ARGS;
+                return response;
+            }
+            if (is_foo_obj_hashable(subcmds[1]) == 0) {
+                log_error("dispatch(): got unhashable key for DEL");
+                response->status = RES_BAD_HASH;
+                return response;
             }
             err = do_del(server, subcmds[1], subcmd_to_len[1]);
-            if (err == RES_ERR) {
+            if (err) {
                 log_error("dispatch(): got err from do_del()");
-                return NULL;
+                response->status = err;
+                return response;
             }
-            if (err == RES_NX) {
-                response->status = RES_NX;
-                response->data = NULL;
-                response->datalen = 0;
-            } else {
-                response->status = RES_OK;
-                response->data = NULL;
-                response->datalen = 0;
-            }
-            break;
+            response->status = RES_OK;
+            return response;
         default:
             log_error("dispatch(): got unrecognized command");
-            return NULL;
+            response->status = RES_BAD_CMD;
+            return response;
     }
 
+    response->status = RES_UNKNOWN;
     return response;
 
 }
@@ -200,41 +210,45 @@ int32_t do_put(foo_kv_server *server, const uint8_t *key, int32_t klen, const ui
     PyObject *py_key = PyBytes_FromStringAndSize((char *)key, klen);
     if (!py_key) {
         log_error("do_put(): failed to cast key as py object");
-        return RES_ERR;
+        return RES_ERR_CLIENT;
     }
 
     PyObject *py_val = PyBytes_FromStringAndSize((char *)val, vlen);
     if (!py_val) {
         log_error("do_put(): failed to cast val as py object");
-        return RES_ERR;
+        return RES_ERR_CLIENT;
     }
 
     PyObject *loaded_key = loads_from_pyobject(py_key);
     Py_DECREF(py_key);
     if (!loaded_key) {
         log_error("do_put(): failed to loads(key)");
-        return RES_ERR;
+        return RES_BAD_TYPE;
     }
 
     PyObject *loaded_val = loads_from_pyobject(py_val);
     Py_DECREF(py_val);
     if (!loaded_val) {
         log_error("do_put(): failed to loads(val)");
-        return RES_ERR;
+        return RES_BAD_TYPE;
     }
 
     int32_t has_lock, is_released;
     has_lock = _threading_lock_acquire_block(server->storage_lock);
     if (has_lock < 0) {
         log_error("do_put(): encountered error trying to acquire storage lock");
-        return RES_ERR;
+        return RES_ERR_SERVER;
     }
     if (!has_lock) {
         log_error("do_put(): failed to acquire_lock");
-        return RES_ERR;
+        return RES_ERR_SERVER;
     }
 
-    PyDict_SetItem(server->storage, loaded_key, loaded_val);
+    if (PyDict_SetItem(server->storage, loaded_key, loaded_val) < 0) {
+        log_error("do_put(): got error setting item in storage: perhaps this is expected");
+        // perhaps we got unhashable type
+        return RES_ERR_SERVER;
+    }
 
     Py_DECREF(loaded_key);
     Py_DECREF(loaded_val);
@@ -242,7 +256,7 @@ int32_t do_put(foo_kv_server *server, const uint8_t *key, int32_t klen, const ui
     is_released = _threading_lock_release(server->storage_lock);
     if (is_released < 0) {
         log_error("do_put(): failed to release lock");
-        return RES_ERR;
+        return RES_ERR_SERVER;
     }
 
     return RES_OK;
@@ -262,14 +276,14 @@ int32_t do_del(foo_kv_server *server, const uint8_t *key, int32_t klen) {
     PyObject *py_key = PyBytes_FromStringAndSize((char *)key, klen);
     if (!py_key) {
         log_error("do_del(): failed to cast key to py object");
-        return RES_ERR;
+        return RES_ERR_CLIENT;
     }
 
     PyObject *loaded_key = loads_from_pyobject(py_key);
     Py_DECREF(py_key);
     if (!loaded_key) {
         log_error("do_del(): failed to loads(key)");
-        return RES_ERR;
+        return RES_BAD_TYPE;
     }
 
     #if _FOO_KV_DEBUG == 1
@@ -277,18 +291,18 @@ int32_t do_del(foo_kv_server *server, const uint8_t *key, int32_t klen) {
 
     if (server->storage == NULL) {
         log_error("do_del(): server storage has become NULL!!!");
-        return RES_ERR;
+        return RES_ERR_SERVER;
     }
     #endif
 
     res = PyDict_Contains(server->storage, loaded_key);
     if (res < 0) {
         log_error("do_del(): server storage contains returned error!");
-        return RES_ERR;
+        return RES_ERR_SERVER;
     }
     if (res == 0) {
         log_debug("do_del(): storage does not contain key, perhaps this is expected");
-        return RES_NX;
+        return RES_BAD_KEY;
     }
     #if _FOO_KV_DEBUG == 1
     log_debug("do_del(): storage contains key");
@@ -298,11 +312,11 @@ int32_t do_del(foo_kv_server *server, const uint8_t *key, int32_t klen) {
     has_lock = _threading_lock_acquire_block(server->storage_lock);
     if (has_lock < 0) {
         log_error("do_del(): encountered error trying to acquire storage lock");
-        return RES_ERR;
+        return RES_ERR_SERVER;
     }
     if (!has_lock) {
         log_error("do_del(): failed to acquire storage lock");
-        return RES_ERR;
+        return RES_ERR_SERVER;
     }
 
     #if _FOO_KV_DEBUG == 1
@@ -319,7 +333,7 @@ int32_t do_del(foo_kv_server *server, const uint8_t *key, int32_t klen) {
     is_released = _threading_lock_release(server->storage_lock);
     if (is_released < 0) {
         log_error("do_del(): failed to release storage lock");
-        return RES_ERR;
+        return RES_ERR_SERVER;
     }
 
     #if _FOO_KV_DEBUG == 1
@@ -331,7 +345,7 @@ int32_t do_del(foo_kv_server *server, const uint8_t *key, int32_t klen) {
         log_debug("do_del(): key was not in storage: perhaps this is expected");
         #endif
         PyErr_Clear();
-        return RES_NX;
+        return RES_ERR_SERVER;
     }
 
 
@@ -549,4 +563,23 @@ PyObject *_loads_list(const char *x) {
     }
     Py_DECREF(intermediate);
     return res;
+}
+
+int32_t is_foo_obj_hashable(const uint8_t *x) {
+
+    switch (*x) {
+        case '*':
+        case '?':
+            return 0;
+        case '#':
+        case '%':
+        case '\'':
+        case '"':
+            return 1;
+        default:
+            return -1;
+    }
+
+    return 0;
+
 }

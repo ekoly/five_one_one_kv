@@ -54,6 +54,19 @@ PyObject *_decode_str = NULL;
 PyObject *_utf8_str = NULL;
 PyObject *_empty_args = NULL;
 
+// response status codes
+const int RES_OK = 0; // expected result
+const int RES_UNKNOWN = 11; // catch-all for unknown errors
+const int RES_ERR_SERVER = 21; // server messed up 
+const int RES_ERR_CLIENT = 22; // server blames client
+const int RES_BAD_CMD = 31; // command not found
+const int RES_BAD_TYPE = 32; // type not found
+const int RES_BAD_KEY = 33; // key not found
+const int RES_BAD_ARGS = 34; // bad args for the command
+const int RES_BAD_OP = 35; // bad operation, ex. INC on not int
+const int RES_BAD_IX = 36; // index out of bound for list/queue commands
+const int RES_BAD_HASH = 37; // index out of bound for list/queue commands
+
 
 // error handling
 void log_error(const char *msg) {
@@ -175,7 +188,7 @@ int32_t write_all(int fd, const char *buff, size_t n) {
 
 struct Conn *conn_new(int connfd) {
 
-    struct Conn *conn = (struct Conn *)malloc(sizeof(struct Conn));
+    struct Conn *conn = calloc(1, sizeof(struct Conn));
     if (conn == NULL) {
         close(connfd);
         return NULL;
@@ -183,6 +196,7 @@ struct Conn *conn_new(int connfd) {
     conn->fd = connfd;
     conn->state = STATE_REQ_WAITING;
     conn->rbuff_size = 0;
+    conn->rbuff_read = 0;
     conn->rbuff_max = DEFAULT_MSG_SIZE;
     conn->wbuff_size = 0;
     conn->wbuff_sent = 0;
@@ -190,61 +204,109 @@ struct Conn *conn_new(int connfd) {
     conn->connid = conncounter++;
 
     conn->rbuff = calloc(DEFAULT_MSG_SIZE, sizeof(uint8_t));
+    if (!conn->rbuff) {
+        return NULL;
+    }
     conn->wbuff = calloc(DEFAULT_MSG_SIZE, sizeof(uint8_t));
+    if (!conn->wbuff) {
+        return NULL;
+    }
 
-    conn->lock = PyObject_CallNoArgs(_threading_lock);
+    conn->lock = calloc(1, sizeof(sem_t));
+    if (!conn->lock) {
+        close(connfd);
+        return NULL;
+    }
+    sem_init(conn->lock, 0, 1);
 
     return conn;
 
 }
 
-int32_t conn_resize_rbuff(struct Conn *conn, uint32_t newsize) {
+int32_t conn_rbuff_resize(struct Conn *conn, uint32_t newsize) {
 
-    uint8_t *newbuff = (uint8_t *)realloc(conn->rbuff, (newsize + 1) * sizeof(uint8_t));
-    if (!newbuff) {
+    uint8_t *newbuff;
+
+    if (newsize == 0) {
         return -1;
     }
 
+    if (conn->rbuff_read == 0) {
+        newbuff = (uint8_t *)realloc(conn->rbuff, (newsize + 1) * sizeof(uint8_t));
+        if (!newbuff) {
+            return -1;
+        }
+    } else {
+        newbuff = calloc(newsize + 1, sizeof(uint8_t));
+        if (!newbuff) {
+            return -1;
+        }
+        memcpy(newbuff, conn->rbuff + conn->rbuff_read, conn->rbuff_size - conn->rbuff_read);
+        free(conn->rbuff);
+    }
+
     conn->rbuff = newbuff;
+    conn->rbuff_size -= conn->rbuff_read;
+    conn->rbuff_read = 0;
     conn->rbuff_max = newsize;
 
     return 0;
 
 }
 
-int32_t conn_resize_wbuff(struct Conn *conn, uint32_t newsize) {
+int32_t conn_wbuff_resize(struct Conn *conn, uint32_t newsize) {
 
-    uint8_t *newbuff = (uint8_t *)realloc(conn->wbuff, newsize * sizeof(uint8_t));
-    if (!newbuff) {
+    uint8_t *newbuff;
+
+    if (newsize == 0) {
         return -1;
     }
 
+    if (conn->wbuff_sent == 0) {
+        newbuff = (uint8_t *)realloc(conn->wbuff, (newsize + 1) * sizeof(uint8_t));
+        if (!newbuff) {
+            return -1;
+        }
+    } else {
+        newbuff = calloc(newsize + 1, sizeof(uint8_t));
+        if (!newbuff) {
+            return -1;
+        }
+        memcpy(newbuff, conn->wbuff + conn->wbuff_sent, conn->wbuff_size - conn->wbuff_sent);
+        free(conn->wbuff);
+    }
+
     conn->wbuff = newbuff;
+    conn->wbuff_size -= conn->wbuff_sent;
+    conn->wbuff_sent = 0;
     conn->wbuff_max = newsize;
 
     return 0;
 
 }
 
-int32_t conn_flush(struct Conn *conn, uint32_t flushsize) {
+int32_t conn_rbuff_flush(struct Conn *conn) {
 
     // remove the request from the buffer
-    size_t remain = conn->rbuff_size - flushsize;
+    size_t remain = conn->rbuff_size - conn->rbuff_read;
+    size_t newsize;
     if (remain) {
-        size_t newsize = CEIL(remain, 1024);
-        if (newsize < 4096) {
-            newsize = 4096;
-        }
-        uint8_t *newbuff = calloc(newsize + 1, sizeof(uint8_t));
-        if (!newbuff) {
-            return -1;
-        }
-        memcpy(newbuff, conn->rbuff + flushsize, remain);
-        free(conn->rbuff);
-        conn->rbuff = newbuff;
-        conn->rbuff_size = remain;
-        conn->rbuff_max = newsize;
+        newsize = CEIL(remain + 1, 4096);
+    } else {
+        newsize = 4096;
     }
+    uint8_t *newbuff = calloc(newsize + 1, sizeof(uint8_t));
+    if (!newbuff) {
+        return -1;
+    }
+    if (remain) {
+        memcpy(newbuff, conn->rbuff + conn->rbuff_read, remain);
+    }
+    free(conn->rbuff);
+    conn->rbuff = newbuff;
+    conn->rbuff_size = remain;
+    conn->rbuff_read = 0;
+    conn->rbuff_max = newsize;
 
     conn->rbuff_size = remain;
 
@@ -263,14 +325,13 @@ int32_t conn_write_response(struct Conn *conn, const struct Response *response) 
 
     // resize if necessary
     if (wbuff_size > conn->wbuff_max) {
-        size_t newsize = CEIL(wbuff_size, 1024);
+        size_t newsize = CEIL(wbuff_size + 1, 1024);
         if (newsize > MAX_MSG_SIZE) {
             log_error("conn_write_response(): got response larger than max allowed size");
             return -1;
         }
-        int32_t err = conn_resize_wbuff(conn, newsize);
-        if (err) {
-            return err;
+        if (conn_wbuff_resize(conn, newsize) < 0) {
+            return -1;
         }
     }
 
@@ -632,5 +693,144 @@ int32_t _threading_lock_locked(PyObject *lock) {
     Py_DECREF(callable);
 
     return Py_IsTrue(res);
+
+}
+
+struct intq_t *intq_new() {
+    struct intq_t *intq = calloc(1, sizeof(struct intq_t));
+    if (!intq) {
+        return NULL;
+    }
+    intq->front = calloc(1, sizeof(struct intq_node_t));
+    if (!intq->front) {
+        return NULL;
+    }
+    intq->back = intq->front;
+    intq->front_ix = 0;
+    intq->back_ix = 0;
+    return intq;
+}
+
+void intq_destroy(struct intq_t *intq) {
+    struct intq_node_t *node, *next;
+    node = intq->front;
+    while (node) {
+        next = node->next;
+        free(node);
+        node = next;
+    }
+    free(intq);
+}
+
+int32_t intq_put(struct intq_t *intq, int32_t val) {
+
+    if (intq->back_ix >= INTQ_NODE_SIZE) {
+        struct intq_node_t *newnode = calloc(1, sizeof(struct intq_node_t));
+        if (!newnode) {
+            return -1;
+        }
+        intq->back->next = newnode;
+        intq->back = newnode;
+        intq->back_ix = 0;
+    }
+
+    intq->back->vals[intq->back_ix] = val;
+    intq->back_ix++;
+
+    return 0;
+
+}
+
+int32_t intq_get(struct intq_t *intq) {
+
+    if (intq_empty(intq)) {
+        return -1; // because of this, intq_t only works with positve ints, but that's ok
+    }
+
+    int32_t res = intq->front->vals[intq->front_ix];
+    
+    intq->front_ix++;
+    if (intq->front_ix >= INTQ_NODE_SIZE) {
+        if (intq_empty(intq)) {
+            intq->front_ix = 0;
+            intq->back_ix = 0;
+        } else {
+            struct intq_node_t *oldnode = intq->front;
+            intq->front = intq->front->next;
+            free(oldnode);
+            intq->front_ix = 0;
+        }
+    }
+
+    return res;
+
+}
+
+struct cond_t *cond_new() {
+
+    struct cond_t *cond = calloc(1, sizeof(struct cond_t));
+    if (!cond) {
+        return NULL;
+    }
+    sem_init(&cond->acq_lock, 0, 1); 
+    sem_init(&cond->notify_lock, 0, 1); 
+
+    Py_BEGIN_ALLOW_THREADS
+    if (sem_wait(&cond->notify_lock)) {
+        return NULL;
+    }
+    Py_END_ALLOW_THREADS
+
+    return cond;
+
+}
+
+int32_t cond_wait(struct cond_t *cond) {
+
+    // intentionally need to wait for acq lock both before and after notify wait operation
+    Py_BEGIN_ALLOW_THREADS
+    if (sem_wait(&cond->acq_lock)) {
+        return -1;
+    }
+    Py_END_ALLOW_THREADS
+
+    sem_post(&cond->acq_lock);
+
+    Py_BEGIN_ALLOW_THREADS
+    if (sem_wait(&cond->notify_lock)) {
+        return -1;
+    }
+    Py_END_ALLOW_THREADS
+
+    Py_BEGIN_ALLOW_THREADS
+    if (sem_wait(&cond->acq_lock)) {
+        return -1;
+    }
+    Py_END_ALLOW_THREADS
+
+    if (sem_post(&cond->acq_lock)) {
+        return -1;
+    }
+
+    return 0;
+
+}
+
+int32_t cond_notify(struct cond_t *cond) {
+
+    Py_BEGIN_ALLOW_THREADS
+    if (sem_wait(&cond->acq_lock)) {
+        return -1;
+    }
+    Py_END_ALLOW_THREADS
+
+    // don't care if the following fails
+    sem_post(&cond->notify_lock);
+
+    if (sem_post(&cond->acq_lock)) {
+        return -1;
+    }
+
+    return 0;
 
 }
