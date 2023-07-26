@@ -36,3 +36,11 @@ class NotHashableError(Exception):
     """
 
     pass
+
+
+class TooLargeError(Exception):
+    """
+    The user tried to send a message to the server that was too large.
+    """
+
+    pass

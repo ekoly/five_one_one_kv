@@ -5,6 +5,7 @@ import struct
 from typing import Any, Tuple, Union
 
 from five_one_one_kv.c import (
+    MAX_MSG_SIZE,
     RES_BAD_ARGS,
     RES_BAD_CMD,
     RES_BAD_HASH,
@@ -147,9 +148,14 @@ class Client:
     def __init__(self):
         self._sock = socket.create_connection(("0.0.0.0", 8513))
 
+    def _send(self, data: bytes) -> None:
+        if len(data) > MAX_MSG_SIZE:
+            raise TooLargeError("Message size was too large.")
+        self._sock.send(data)
+
     def get(self, key: Any) -> bytes:
         key = dumps_hashable(key)
-        self._sock.send(_pack(b"get", key))
+        self._send(_pack(b"get", key))
         status, data = self._looped_recv()
         if status == RES_OK:
             return loads(data)
@@ -159,7 +165,7 @@ class Client:
 
     def __getitem__(self, key: Any) -> Any:
         key = dumps_hashable(key)
-        self._sock.send(_pack(b"get", key))
+        self._send(_pack(b"get", key))
         status, data = self._looped_recv()
         if status == RES_OK:
             return loads(data)
@@ -170,7 +176,7 @@ class Client:
     def __setitem__(self, key: Any, val: Any) -> None:
         key = dumps_hashable(key)
         val = dumps(val)
-        self._sock.send(_pack(b"put", key, val))
+        self._send(_pack(b"put", key, val))
         status, data = self._looped_recv()
         if status == RES_OK:
             return
@@ -178,7 +184,7 @@ class Client:
 
     def __delitem__(self, key: Any) -> None:
         key = dumps_hashable(key)
-        self._sock.send(_pack(b"del", key))
+        self._send(_pack(b"del", key))
         status, data = self._looped_recv()
         if status == RES_OK:
             return
@@ -205,6 +211,11 @@ class Pipeline:
         self._keys = []
         self._wbuff = []
 
+    def _save(self, data: bytes) -> None:
+        if len(data) > MAX_MSG_SIZE:
+            raise TooLargeError("Message size was too large.")
+        self._wbuff.append(data)
+
     def __enter__(self):
         return self
 
@@ -222,18 +233,18 @@ class Pipeline:
     def get(self, key: Any) -> bytes:
         key = dumps_hashable(key)
         self._keys.append(key)
-        self._wbuff.append(_pack(b"get", key))
+        self._save(_pack(b"get", key))
 
     def __setitem__(self, key: Any, val: Any) -> None:
         key = dumps_hashable(key)
         self._keys.append(key)
         val = dumps(val)
-        self._wbuff.append(_pack(b"put", key, val))
+        self._save(_pack(b"put", key, val))
 
     def __delitem__(self, key: Any) -> None:
         key = dumps_hashable(key)
         self._keys.append(key)
-        self._wbuff.append(_pack(b"del", key))
+        self._save(_pack(b"del", key))
 
     def _looped_recv(self):
         response = b""

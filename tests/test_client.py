@@ -4,9 +4,7 @@ import pytest
 
 from five_one_one_kv.exceptions import NotHashableError
 
-
-def randobytes():
-    return bytes(random.randint(ord("a"), ord("z")) for _ in range(8))
+from .utils import randobytes
 
 
 def test_basics(client):

@@ -65,8 +65,12 @@ int32_t dispatch(foo_kv_server *server, int32_t connid, const uint8_t *buff, int
         offset += slen;
 
         #if _FOO_KV_DEBUG == 1
-        sprintf(debug_buffer, "dispatch(): subcmds[%d]=%.*s", (int)ix, slen, subcmds[ix]);
-        log_debug(debug_buffer);
+        if (slen < 200) {
+            sprintf(debug_buffer, "dispatch(): subcmds[%d]=%.*s", (int)ix, slen, subcmds[ix]);
+            log_debug(debug_buffer);
+        } else {
+            log_debug("dispatch(): subcmd too long for log");
+        }
         sprintf(debug_buffer, "dispatch(): offset=%d", offset);
         log_debug(debug_buffer);
         #endif
@@ -87,8 +91,12 @@ int32_t dispatch(foo_kv_server *server, int32_t connid, const uint8_t *buff, int
     response->status = -1;
 
     #if _FOO_KV_DEBUG == 1
-    sprintf(debug_buffer, "dispatch(): cmd=%.*s hash=%d", subcmd_to_len[0], subcmds[0], cmd_hash);
-    log_debug(debug_buffer);
+    if (subcmd_to_len[0] < 200) {
+        sprintf(debug_buffer, "dispatch(): cmd=%.*s hash=%d", subcmd_to_len[0], subcmds[0], cmd_hash);
+        log_debug(debug_buffer);
+    } else {
+        log_debug("dispatch(): cmd too long for buffer");
+    }
     #endif
 
     Py_INCREF(server);
@@ -200,10 +208,10 @@ int32_t do_put(foo_kv_server *server, const uint8_t **args, const int32_t *arg_t
     if (!loaded_key) {
         PyObject *py_err = PyErr_Occurred();
         if (py_err && PyErr_ExceptionMatches(_not_hashable_error)) {
-            log_error("do_get(): Failed to loads(key): not hashable");
+            log_error("do_put(): Failed to loads(key): not hashable");
             response->status = RES_BAD_HASH;
         } else {
-            log_error("do_get(): Failed to loads(key): bad type");
+            log_error("do_put(): Failed to loads(key): bad type");
             response->status = RES_BAD_TYPE;
         }
         return 0;
@@ -755,6 +763,11 @@ PyObject *_loads_collectable_from_pyobject(PyObject *x) {
 
     char *res = PyBytes_AsString(x);
     if (!res) {
+        return NULL;
+    }
+
+    if (!PyObject_Length(x)) {
+        PyErr_SetString(PyExc_TypeError, "cannot load zero length bytes");
         return NULL;
     }
 
