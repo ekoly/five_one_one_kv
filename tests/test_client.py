@@ -2,6 +2,8 @@ import random
 
 import pytest
 
+from five_one_one_kv.exceptions import NotHashableError
+
 
 def randobytes():
     return bytes(random.randint(ord("a"), ord("z")) for _ in range(8))
@@ -42,6 +44,7 @@ def test_overwrite(client):
         ("dalmations",),
         (21.34,),
         (55,),
+        ([1, 1, 2, 3, 5, 8, 13, 21],),
     ),
 )
 def test_types(client, k, v):
@@ -66,7 +69,7 @@ def test_types(client, k, v):
     ),
 )
 def test_unhashable_types(client, k):
-    with pytest.raises(TypeError):
+    with pytest.raises(NotHashableError):
         client[k] = "bar"
 
 

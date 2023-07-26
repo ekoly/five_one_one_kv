@@ -1,4 +1,7 @@
-from five_one_one_kv.c import dumps, loads
+import pytest
+
+from five_one_one_kv.c import dumps, dumps_hashable, loads, loads_hashable
+from five_one_one_kv.exceptions import EmbeddedCollectionError, NotHashableError
 
 
 def test_int():
@@ -18,7 +21,10 @@ def test_float():
 def test_str():
     x = "Glücksburg"
     d = dumps(x)
-    l = loads(d)
+    try:
+        l = loads(d)
+    except ValueError:
+        print(d)
     assert l == x
 
 
@@ -48,3 +54,22 @@ def test_bool_true():
     d = dumps(x)
     l = loads(d)
     assert l == x
+
+
+def test_list_imbedded():
+    x = [
+        511,
+        [
+            "Glücksburg",
+        ],
+        b"mel ott",
+        3.14159,
+    ]
+    with pytest.raises(EmbeddedCollectionError):
+        d = dumps(x)
+
+
+def test_list_hashable():
+    x = [1, 2, 3]
+    with pytest.raises(NotHashableError):
+        d = dumps_hashable(x)

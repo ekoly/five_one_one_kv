@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <semaphore.h>
+#include <pthread.h>
 
 #include <Python.h>
 
@@ -66,6 +67,16 @@ extern PyObject *_json_dumps_f;
 extern PyObject *_decode_str;
 extern PyObject *_utf8_str;
 extern PyObject *_empty_args;
+extern PyObject *_foo_exceptions_module;
+extern PyObject *_embedded_collection_error;
+extern PyObject *_not_hashable_error;
+
+#define INT_SYMBOL '#'
+#define FLOAT_SYMBOL '%'
+#define BYTES_SYMBOL 'b'
+#define STRING_SYMBOL 'u'
+#define LIST_SYMBOL '['
+#define BOOL_SYMBOL '?'
 
 // this sets the above cached objects
 int32_t ensure_py_deps();
@@ -74,6 +85,7 @@ int32_t _threading_lock_acquire(PyObject *lock);
 int32_t _threading_lock_acquire_block(PyObject *lock);
 int32_t _threading_lock_release(PyObject *lock);
 int32_t _threading_lock_locked(PyObject *lock);
+int32_t _pyobject_safe_delitem(PyObject *obj, PyObject *key);
 
 // server connection states
 enum {
@@ -86,7 +98,7 @@ enum {
     STATE_TERM = 6,
 };
 
-struct Conn {
+struct conn_t {
     int fd;
     uint32_t state;
     size_t rbuff_size;
@@ -102,7 +114,7 @@ struct Conn {
 
 };
 
-struct Response {
+struct response_t {
     int32_t status;
     uint8_t *data;
     int32_t datalen;
@@ -135,11 +147,11 @@ int32_t read_full(int fd, char *buff, size_t n);
 int32_t write_all(int fd, const char *buff, size_t n);
 
 // connection management
-struct Conn *conn_new(int connfd);
-int32_t conn_rbuff_resize(struct Conn *conn, uint32_t newsize);
-int32_t conn_wbuff_resize(struct Conn *conn, uint32_t newsize);
-int32_t conn_rbuff_flush(struct Conn *conn);
-int32_t conn_write_response(struct Conn *conn, const struct Response *response);
+struct conn_t *conn_new(int connfd);
+int32_t conn_rbuff_resize(struct conn_t *conn, uint32_t newsize);
+int32_t conn_wbuff_resize(struct conn_t *conn, uint32_t newsize);
+int32_t conn_rbuff_flush(struct conn_t *conn);
+int32_t conn_write_response(struct conn_t *conn, const struct response_t *response);
 
 struct intq_node_t {
     struct intq_node_t *next;
@@ -159,14 +171,17 @@ void intq_destroy(struct intq_t *intq);
 int32_t intq_put(struct intq_t *intq, int32_t val);
 int32_t intq_get(struct intq_t *intq);
 
-// equivalent of threading.Condition
 struct cond_t {
-    sem_t acq_lock;
-    sem_t notify_lock;
+    pthread_cond_t cond;
+    pthread_mutex_t mutex;
 };
 
 struct cond_t *cond_new();
 int32_t cond_wait(struct cond_t *cond);
 int32_t cond_notify(struct cond_t *cond);
+
+// threadsafe wrappers for sem
+int32_t threadsafe_sem_wait(sem_t *sem);
+int32_t threadsafe_sem_timedwait_onesec(sem_t *sem);
 
 #endif

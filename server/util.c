@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <sys/time.h>
+#include <pthread.h>
 
 #include "util.h"
 
@@ -52,12 +53,16 @@ PyObject *_json_loads_f = NULL;
 PyObject *_json_dumps_f = NULL;
 PyObject *_decode_str = NULL;
 PyObject *_utf8_str = NULL;
+PyObject *_foo_exceptions_module = NULL;
 PyObject *_empty_args = NULL;
+PyObject *_embedded_collection_error = NULL;
+PyObject *_not_hashable_error = NULL;
+
 
 // response status codes
 const int RES_OK = 0; // expected result
 const int RES_UNKNOWN = 11; // catch-all for unknown errors
-const int RES_ERR_SERVER = 21; // server messed up 
+const int RES_ERR_SERVER = 21; // server messed up
 const int RES_ERR_CLIENT = 22; // server blames client
 const int RES_BAD_CMD = 31; // command not found
 const int RES_BAD_TYPE = 32; // type not found
@@ -186,9 +191,9 @@ int32_t write_all(int fd, const char *buff, size_t n) {
     return 0;
 }
 
-struct Conn *conn_new(int connfd) {
+struct conn_t *conn_new(int connfd) {
 
-    struct Conn *conn = calloc(1, sizeof(struct Conn));
+    struct conn_t *conn = PyMem_RawCalloc(1, sizeof(struct conn_t));
     if (conn == NULL) {
         close(connfd);
         return NULL;
@@ -203,16 +208,16 @@ struct Conn *conn_new(int connfd) {
     conn->wbuff_max = DEFAULT_MSG_SIZE;
     conn->connid = conncounter++;
 
-    conn->rbuff = calloc(DEFAULT_MSG_SIZE, sizeof(uint8_t));
+    conn->rbuff = PyMem_RawCalloc(DEFAULT_MSG_SIZE, sizeof(uint8_t));
     if (!conn->rbuff) {
         return NULL;
     }
-    conn->wbuff = calloc(DEFAULT_MSG_SIZE, sizeof(uint8_t));
+    conn->wbuff = PyMem_RawCalloc(DEFAULT_MSG_SIZE, sizeof(uint8_t));
     if (!conn->wbuff) {
         return NULL;
     }
 
-    conn->lock = calloc(1, sizeof(sem_t));
+    conn->lock = PyMem_RawCalloc(1, sizeof(sem_t));
     if (!conn->lock) {
         close(connfd);
         return NULL;
@@ -223,7 +228,7 @@ struct Conn *conn_new(int connfd) {
 
 }
 
-int32_t conn_rbuff_resize(struct Conn *conn, uint32_t newsize) {
+int32_t conn_rbuff_resize(struct conn_t *conn, uint32_t newsize) {
 
     uint8_t *newbuff;
 
@@ -232,17 +237,17 @@ int32_t conn_rbuff_resize(struct Conn *conn, uint32_t newsize) {
     }
 
     if (conn->rbuff_read == 0) {
-        newbuff = (uint8_t *)realloc(conn->rbuff, (newsize + 1) * sizeof(uint8_t));
+        newbuff = (uint8_t *)PyMem_RawRealloc(conn->rbuff, (newsize + 1) * sizeof(uint8_t));
         if (!newbuff) {
             return -1;
         }
     } else {
-        newbuff = calloc(newsize + 1, sizeof(uint8_t));
+        newbuff = PyMem_RawCalloc(newsize + 1, sizeof(uint8_t));
         if (!newbuff) {
             return -1;
         }
         memcpy(newbuff, conn->rbuff + conn->rbuff_read, conn->rbuff_size - conn->rbuff_read);
-        free(conn->rbuff);
+        PyMem_RawFree(conn->rbuff);
     }
 
     conn->rbuff = newbuff;
@@ -254,7 +259,7 @@ int32_t conn_rbuff_resize(struct Conn *conn, uint32_t newsize) {
 
 }
 
-int32_t conn_wbuff_resize(struct Conn *conn, uint32_t newsize) {
+int32_t conn_wbuff_resize(struct conn_t *conn, uint32_t newsize) {
 
     uint8_t *newbuff;
 
@@ -263,17 +268,17 @@ int32_t conn_wbuff_resize(struct Conn *conn, uint32_t newsize) {
     }
 
     if (conn->wbuff_sent == 0) {
-        newbuff = (uint8_t *)realloc(conn->wbuff, (newsize + 1) * sizeof(uint8_t));
+        newbuff = (uint8_t *)PyMem_RawRealloc(conn->wbuff, (newsize + 1) * sizeof(uint8_t));
         if (!newbuff) {
             return -1;
         }
     } else {
-        newbuff = calloc(newsize + 1, sizeof(uint8_t));
+        newbuff = PyMem_RawCalloc(newsize + 1, sizeof(uint8_t));
         if (!newbuff) {
             return -1;
         }
         memcpy(newbuff, conn->wbuff + conn->wbuff_sent, conn->wbuff_size - conn->wbuff_sent);
-        free(conn->wbuff);
+        PyMem_RawFree(conn->wbuff);
     }
 
     conn->wbuff = newbuff;
@@ -285,7 +290,7 @@ int32_t conn_wbuff_resize(struct Conn *conn, uint32_t newsize) {
 
 }
 
-int32_t conn_rbuff_flush(struct Conn *conn) {
+int32_t conn_rbuff_flush(struct conn_t *conn) {
 
     // remove the request from the buffer
     size_t remain = conn->rbuff_size - conn->rbuff_read;
@@ -295,14 +300,15 @@ int32_t conn_rbuff_flush(struct Conn *conn) {
     } else {
         newsize = 4096;
     }
-    uint8_t *newbuff = calloc(newsize + 1, sizeof(uint8_t));
+    uint8_t *newbuff = PyMem_RawCalloc(newsize + 1, sizeof(uint8_t));
     if (!newbuff) {
+        log_error("conn_rbuff_flush(): failed to flush rbuff");
         return -1;
     }
     if (remain) {
         memcpy(newbuff, conn->rbuff + conn->rbuff_read, remain);
     }
-    free(conn->rbuff);
+    PyMem_RawFree(conn->rbuff);
     conn->rbuff = newbuff;
     conn->rbuff_size = remain;
     conn->rbuff_read = 0;
@@ -310,11 +316,15 @@ int32_t conn_rbuff_flush(struct Conn *conn) {
 
     conn->rbuff_size = remain;
 
+    #if _FOO_KV_DEBUG == 1
+    log_debug("conn_rbuff_flush(): successfully flushed rbuff");
+    #endif
+
     return 0;
 
 }
 
-int32_t conn_write_response(struct Conn *conn, const struct Response *response) {
+int32_t conn_write_response(struct conn_t *conn, const struct response_t *response) {
     // we should never get here if in state STATE_RES_WAITING
     // therefore wbuff should always be flushed
 
@@ -343,7 +353,7 @@ int32_t conn_write_response(struct Conn *conn, const struct Response *response) 
     if (response->datalen > 0) {
         memcpy(conn->wbuff + 8, response->data, response->datalen);
     }
-    // update `wbuff_size`
+    // update `wbuff_size` and `wbuff_sent`
     conn->wbuff_size = wbuff_size;
 
     return 0;
@@ -416,7 +426,7 @@ int32_t ensure_py_deps() {
     if (_deq_class == NULL) {
         return -1;
     }
-    _pop_str = PyUnicode_FromString("popleft");
+    _pop_str = PyUnicode_FromString("pop");
     if (_pop_str == NULL) {
         return -1;
     }
@@ -528,7 +538,7 @@ int32_t ensure_py_deps() {
         return -1;
     }
 
-    _int_symbol = PyBytes_FromString("#");
+    _int_symbol = PyBytes_FromFormat("%c", INT_SYMBOL);
     if (_int_symbol == NULL) {
         return -1;
     }
@@ -538,7 +548,7 @@ int32_t ensure_py_deps() {
     Py_DECREF(int_class);
     Py_DECREF(_int_symbol);
 
-    _float_symbol = PyBytes_FromString("%");
+    _float_symbol = PyBytes_FromFormat("%c", FLOAT_SYMBOL);
     if (_float_symbol == NULL) {
         return -1;
     }
@@ -548,7 +558,7 @@ int32_t ensure_py_deps() {
     Py_DECREF(float_class);
     Py_DECREF(_float_symbol);
 
-    _bytes_symbol = PyBytes_FromString("'");
+    _bytes_symbol = PyBytes_FromFormat("%c", BYTES_SYMBOL);
     if (_bytes_symbol == NULL) {
         return -1;
     }
@@ -558,7 +568,7 @@ int32_t ensure_py_deps() {
     Py_DECREF(bytes_class);
     Py_DECREF(_bytes_symbol);
 
-    _string_symbol = PyBytes_FromString("\"");
+    _string_symbol = PyBytes_FromFormat("%c", STRING_SYMBOL);
     if (_string_symbol == NULL) {
         return -1;
     }
@@ -567,7 +577,7 @@ int32_t ensure_py_deps() {
     }
     Py_DECREF(_string_symbol);
 
-    _list_symbol = PyBytes_FromString("*");
+    _list_symbol = PyBytes_FromFormat("%c", LIST_SYMBOL);
     if (_list_symbol == NULL) {
         return -1;
     }
@@ -577,7 +587,7 @@ int32_t ensure_py_deps() {
     Py_DECREF(list_class);
     Py_DECREF(_list_symbol);
 
-    _bool_symbol = PyBytes_FromString("?");
+    _bool_symbol = PyBytes_FromFormat("%c", BOOL_SYMBOL);
     if (_bool_symbol == NULL) {
         return -1;
     }
@@ -609,6 +619,21 @@ int32_t ensure_py_deps() {
 
     _empty_args = PyTuple_New(0);
     if (_empty_args == NULL) {
+        return -1;
+    }
+
+    _foo_exceptions_module = PyImport_ImportModule("five_one_one_kv.exceptions");
+    if (_foo_exceptions_module == NULL) {
+        return -1;
+    }
+
+    _embedded_collection_error = PyObject_GetAttrString(_foo_exceptions_module, "EmbeddedCollectionError");
+    if (_embedded_collection_error == NULL) {
+        return -1;
+    }
+
+    _not_hashable_error = PyObject_GetAttrString(_foo_exceptions_module, "NotHashableError");
+    if (_not_hashable_error == NULL) {
         return -1;
     }
 
@@ -696,12 +721,40 @@ int32_t _threading_lock_locked(PyObject *lock) {
 
 }
 
+int32_t _pyobject_safe_delitem(PyObject *obj, PyObject *key) {
+
+    PyObject *py_res;
+    Py_INCREF(obj);
+    Py_INCREF(_pop_str);
+    Py_INCREF(key);
+    Py_INCREF(Py_None);
+
+    py_res = PyObject_CallMethodObjArgs(obj, _pop_str, key, Py_None, NULL);
+    Py_DECREF(obj);
+    Py_DECREF(_pop_str);
+    Py_DECREF(key);
+    Py_DECREF(Py_None);
+
+    if (!py_res) {
+        return -1;
+    }
+
+    if (Py_IsNone(py_res)) {
+        return 0;
+    }
+
+    Py_DECREF(py_res);
+
+    return 1;
+
+}
+
 struct intq_t *intq_new() {
-    struct intq_t *intq = calloc(1, sizeof(struct intq_t));
+    struct intq_t *intq = PyMem_RawCalloc(1, sizeof(struct intq_t));
     if (!intq) {
         return NULL;
     }
-    intq->front = calloc(1, sizeof(struct intq_node_t));
+    intq->front = PyMem_RawCalloc(1, sizeof(struct intq_node_t));
     if (!intq->front) {
         return NULL;
     }
@@ -716,16 +769,16 @@ void intq_destroy(struct intq_t *intq) {
     node = intq->front;
     while (node) {
         next = node->next;
-        free(node);
+        PyMem_RawFree(node);
         node = next;
     }
-    free(intq);
+    PyMem_RawFree(intq);
 }
 
 int32_t intq_put(struct intq_t *intq, int32_t val) {
 
     if (intq->back_ix >= INTQ_NODE_SIZE) {
-        struct intq_node_t *newnode = calloc(1, sizeof(struct intq_node_t));
+        struct intq_node_t *newnode = PyMem_RawCalloc(1, sizeof(struct intq_node_t));
         if (!newnode) {
             return -1;
         }
@@ -748,7 +801,7 @@ int32_t intq_get(struct intq_t *intq) {
     }
 
     int32_t res = intq->front->vals[intq->front_ix];
-    
+
     intq->front_ix++;
     if (intq->front_ix >= INTQ_NODE_SIZE) {
         if (intq_empty(intq)) {
@@ -757,7 +810,7 @@ int32_t intq_get(struct intq_t *intq) {
         } else {
             struct intq_node_t *oldnode = intq->front;
             intq->front = intq->front->next;
-            free(oldnode);
+            PyMem_RawFree(oldnode);
             intq->front_ix = 0;
         }
     }
@@ -768,18 +821,20 @@ int32_t intq_get(struct intq_t *intq) {
 
 struct cond_t *cond_new() {
 
-    struct cond_t *cond = calloc(1, sizeof(struct cond_t));
+    struct cond_t *cond = PyMem_RawCalloc(1, sizeof(struct cond_t));
     if (!cond) {
         return NULL;
     }
-    sem_init(&cond->acq_lock, 0, 1); 
-    sem_init(&cond->notify_lock, 0, 1); 
 
-    Py_BEGIN_ALLOW_THREADS
-    if (sem_wait(&cond->notify_lock)) {
+    if (pthread_cond_init(&cond->cond, NULL)) {
+        PyMem_RawFree(cond);
         return NULL;
     }
-    Py_END_ALLOW_THREADS
+
+    if (pthread_mutex_init(&cond->mutex, NULL)) {
+        PyMem_RawFree(cond);
+        return NULL;
+    }
 
     return cond;
 
@@ -787,28 +842,56 @@ struct cond_t *cond_new() {
 
 int32_t cond_wait(struct cond_t *cond) {
 
-    // intentionally need to wait for acq lock both before and after notify wait operation
-    Py_BEGIN_ALLOW_THREADS
-    if (sem_wait(&cond->acq_lock)) {
-        return -1;
-    }
-    Py_END_ALLOW_THREADS
-
-    sem_post(&cond->acq_lock);
+    int32_t has_lock;
 
     Py_BEGIN_ALLOW_THREADS
-    if (sem_wait(&cond->notify_lock)) {
+    has_lock = pthread_mutex_lock(&cond->mutex);
+    Py_END_ALLOW_THREADS
+
+    if (has_lock) {
+        if (errno == EDEADLK) {
+            log_error("cond_wait(): failed to acquire mutex: thread already owns mutex, will proceed with cond wait");
+            // note that we do not return in this case
+        } else if (errno == EINVAL) {
+            log_error("cond_wait(): failed to acquire mutex: mutex does not appear to be valid");
+            return -1;
+        } else {
+            log_error("cond_wait(): failed to acquire mutex: unknown reason");
+            return -1;
+        }
+    }
+
+    // this call will unlock the mutex, wait for the cond, and then re-lock the mutex
+    // therefore we need to unlock the mutex again
+    Py_BEGIN_ALLOW_THREADS
+    has_lock = pthread_cond_wait(&cond->cond, &cond->mutex);
+    Py_END_ALLOW_THREADS
+
+    if (has_lock) {
+        if (errno == EINVAL) {
+            log_error("cond_wait() failed to wait for condition: condition does not appear to be valid");
+        } else {
+            log_error("cond_wait() failed to wait for condition: unknown reason");
+        }
         return -1;
     }
-    Py_END_ALLOW_THREADS
 
     Py_BEGIN_ALLOW_THREADS
-    if (sem_wait(&cond->acq_lock)) {
-        return -1;
-    }
+    has_lock = pthread_mutex_unlock(&cond->mutex);
     Py_END_ALLOW_THREADS
 
-    if (sem_post(&cond->acq_lock)) {
+    if (has_lock) {
+        if (errno == EBUSY) {
+            log_error("cond_wait() failed to unlock mutex: mutex is busy");
+        } else if (errno == EINVAL) {
+            log_error("cond_wait() failed to unlock mutex: mutex does not appear to be initialized");
+        } else if (errno == EDEADLK) {
+            log_error("cond_wait() failed to unlock mutex: mutex already owns the mutex");
+        } else if (errno == EPERM) {
+            log_error("cond_wait() failed to unlock mutex: mutex does not own the mutex");
+        } else {
+            log_error("cond_wait() failed to unlock mutex: unknown reason");
+        }
         return -1;
     }
 
@@ -818,19 +901,48 @@ int32_t cond_wait(struct cond_t *cond) {
 
 int32_t cond_notify(struct cond_t *cond) {
 
+    int32_t res;
+
     Py_BEGIN_ALLOW_THREADS
-    if (sem_wait(&cond->acq_lock)) {
-        return -1;
-    }
+    res = pthread_cond_signal(&cond->cond);
     Py_END_ALLOW_THREADS
 
-    // don't care if the following fails
-    sem_post(&cond->notify_lock);
-
-    if (sem_post(&cond->acq_lock)) {
+    if (res) {
+        if (errno == EINVAL) {
+            log_error("cond_notify() failed to signal condition: cond does not appear to be initialized");
+        } else {
+            log_error("cond_notify() failed to signal condition: unknown reason");
+        }
         return -1;
     }
 
     return 0;
+
+}
+
+int32_t threadsafe_sem_wait(sem_t *sem) {
+
+    int32_t res;
+
+    Py_BEGIN_ALLOW_THREADS
+    res = sem_wait(sem);
+    Py_END_ALLOW_THREADS
+
+    return res;
+
+}
+
+int32_t threadsafe_sem_timedwait_onesec(sem_t *sem) {
+
+    int32_t res;
+    struct timespec sem_timeout;
+    sem_timeout.tv_sec = 1;
+    sem_timeout.tv_nsec = 0;
+
+    Py_BEGIN_ALLOW_THREADS
+    res = sem_timedwait(sem, &sem_timeout);
+    Py_END_ALLOW_THREADS
+
+    return res;
 
 }

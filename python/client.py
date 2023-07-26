@@ -1,3 +1,4 @@
+import collections
 import io
 import socket
 import struct
@@ -16,37 +17,21 @@ from five_one_one_kv.c import (
     RES_OK,
     RES_UNKNOWN,
     dumps,
+    dumps_hashable,
     loads,
+)
+from five_one_one_kv.exceptions import (
+    ClientError,
+    EmbeddedCollectionError,
+    NotEnoughDataError,
+    NotHashableError,
+    ServerError,
 )
 
 PIPE_UNSTARTED = 0
 PIPE_CONTEXT_MODE = 1
 PIPE_NONCONTEXT_MODE = 2
 PIPE_FINISHED = 3
-
-
-class ServerError(Exception):
-    """
-    Server messed up.
-    """
-
-    pass
-
-
-class ClientError(Exception):
-    """
-    Client messed up.
-    """
-
-    pass
-
-
-class NotEnoughDataError(Exception):
-    """
-    Need to read more data before parsing.
-    """
-
-    pass
 
 
 _SINGLEOFFSET = struct.calcsize("=i")
@@ -67,7 +52,10 @@ def _pack(*args) -> bytes:
         struct_args.append(arg)
     total_len = struct.calcsize("".join(struct_fmt_list))
     struct_fmt_list.insert(1, "i")
-    return struct.pack("".join(struct_fmt_list), total_len, *struct_args)
+    try:
+        return struct.pack("".join(struct_fmt_list), total_len, *struct_args)
+    except struct.error:
+        raise ClientError
 
 
 def _unpack(res: bytes) -> Tuple[int, bytes]:
@@ -136,28 +124,23 @@ def _unpack_from(res: bytes, offset=0) -> Tuple[int, bytes, int]:
     return status, data, offset
 
 
-def raise_exc(status: int) -> None:
-    if status == RES_UNKNOWN:
-        raise Exception("Something went wrong but the server does not know what")
-    if status == RES_ERR_SERVER:
-        raise ServerError("Server encountered an error")
-    if status == RES_ERR_CLIENT:
-        raise ClientError("Server claims client made a mistake")
-    if status == RES_BAD_CMD:
-        raise Exception("Server did not recognize the command")
-    if status == RES_BAD_TYPE:
-        raise Exception("Server did not recognize the argument type")
-    if status == RES_BAD_KEY:
-        raise KeyError
-    if status == RES_BAD_ARGS:
-        raise Exception("Server did not recognize the argument format")
-    if status == RES_BAD_OP:
-        raise Exception("The type associated with the key does not support the command")
-    if status == RES_BAD_IX:
-        raise IndexError
-    if status == RES_BAD_HASH:
-        raise TypeError("Tried to send an unhashable type as a key")
-    raise Exception("Encountered unrecognized status")
+_code_to_exc = collections.defaultdict(
+    lambda: Exception("Encountered unrecognized status")
+)
+_code_to_exc[RES_UNKNOWN] = Exception(
+    "Something went wrong but the server does not know what"
+)
+_code_to_exc[RES_ERR_SERVER] = ServerError("Server encountered an error")
+_code_to_exc[RES_ERR_CLIENT] = ClientError("Server claims client made a mistake")
+_code_to_exc[RES_BAD_CMD] = Exception("Server did not recognize the command")
+_code_to_exc[RES_BAD_TYPE] = TypeError("Server did not recognize the argument type")
+_code_to_exc[RES_BAD_KEY] = KeyError("")
+_code_to_exc[RES_BAD_ARGS] = TypeError("Server did not recognize the argument format")
+_code_to_exc[RES_BAD_OP] = AttributeError(
+    "The type associated with the key does not support the command"
+)
+_code_to_exc[RES_BAD_IX] = IndexError("")
+_code_to_exc[RES_BAD_HASH] = TypeError("Tried to send an unhashable type as a key")
 
 
 class Client:
@@ -165,39 +148,41 @@ class Client:
         self._sock = socket.create_connection(("0.0.0.0", 8513))
 
     def get(self, key: Any) -> bytes:
-        key = dumps(key)
+        key = dumps_hashable(key)
         self._sock.send(_pack(b"get", key))
         status, data = self._looped_recv()
         if status == RES_OK:
             return loads(data)
         if status == RES_BAD_KEY:
             return None
-        raise_exc(status)
+        raise _code_to_exc[status]
 
     def __getitem__(self, key: Any) -> Any:
-        key = dumps(key)
+        key = dumps_hashable(key)
         self._sock.send(_pack(b"get", key))
         status, data = self._looped_recv()
         if status == RES_OK:
             return loads(data)
-        raise_exc(status)
+        if status == RES_BAD_KEY:
+            raise KeyError("key %s not found in server" % (key,))
+        raise _code_to_exc[status]
 
     def __setitem__(self, key: Any, val: Any) -> None:
-        key = dumps(key)
+        key = dumps_hashable(key)
         val = dumps(val)
         self._sock.send(_pack(b"put", key, val))
         status, data = self._looped_recv()
         if status == RES_OK:
             return
-        raise_exc(status)
+        raise _code_to_exc[status]
 
     def __delitem__(self, key: Any) -> None:
-        key = dumps(key)
+        key = dumps_hashable(key)
         self._sock.send(_pack(b"del", key))
         status, data = self._looped_recv()
         if status == RES_OK:
             return
-        raise_exc(status)
+        raise _code_to_exc[status]
 
     def _looped_recv(self):
         response = b""
@@ -217,6 +202,7 @@ class Client:
 class Pipeline:
     def __init__(self):
         self._sock = socket.create_connection(("0.0.0.0", 8513))
+        self._keys = []
         self._wbuff = []
 
     def __enter__(self):
@@ -234,16 +220,19 @@ class Pipeline:
         return self._looped_recv()
 
     def get(self, key: Any) -> bytes:
-        key = dumps(key)
+        key = dumps_hashable(key)
+        self._keys.append(key)
         self._wbuff.append(_pack(b"get", key))
 
     def __setitem__(self, key: Any, val: Any) -> None:
-        key = dumps(key)
+        key = dumps_hashable(key)
+        self._keys.append(key)
         val = dumps(val)
         self._wbuff.append(_pack(b"put", key, val))
 
     def __delitem__(self, key: Any) -> None:
-        key = dumps(key)
+        key = dumps_hashable(key)
+        self._keys.append(key)
         self._wbuff.append(_pack(b"del", key))
 
     def _looped_recv(self):
@@ -263,10 +252,11 @@ class Pipeline:
                             continue
                         results.append(loads(data))
                         continue
-                    try:
-                        raise_exc(status)
-                    except Exception as exc:
-                        results.append(exc)
+                    if status == RES_BAD_KEY:
+                        k = self._keys[len(results)]
+                        results.append(KeyError("key %s not found in server" % (k,)))
+                        continue
+                    results.append(_code_to_exc[status])
             except NotEnoughDataError:
                 continue
         return results

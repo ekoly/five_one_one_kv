@@ -2,6 +2,8 @@ import random
 
 import pytest
 
+from five_one_one_kv.exceptions import NotHashableError
+
 
 def randobytes():
     return bytes(random.randint(ord("a"), ord("z")) for _ in range(8))
@@ -85,6 +87,5 @@ def test_types(pipeline, k, v):
     ),
 )
 def test_unhashable_types(pipeline, k):
-    pipeline[k] = "bar"
-    results = pipeline.submit()
-    assert isinstance(results[0], TypeError)
+    with pytest.raises(NotHashableError):
+        pipeline[k] = "bar"

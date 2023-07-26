@@ -35,11 +35,11 @@ void fd_set_nb(int fd) {
 
 }
 
-int32_t connarray_init(struct ConnArray *conns, int maxsize) {
+int32_t connarray_init(struct conn_array_t *conns, int maxsize) {
 
     conns->size = 0;
     conns->maxsize = maxsize;
-    conns->arr = calloc(maxsize, sizeof(struct Conn *));
+    conns->arr = PyMem_RawCalloc(maxsize, sizeof(struct conn_t *));
     if (conns->arr == NULL) {
         return -1;
     }
@@ -48,30 +48,30 @@ int32_t connarray_init(struct ConnArray *conns, int maxsize) {
 
 }
 
-int32_t connarray_dealloc(struct ConnArray *conns) {
+int32_t connarray_dealloc(struct conn_array_t *conns) {
     
     for (int32_t ix = 0; ix < conns->maxsize; ix++) {
-        struct Conn *conn = conns->arr[ix];
+        struct conn_t *conn = conns->arr[ix];
         if (conn == NULL) {
             continue;
         }
         connarray_remove(conns, conn);
     }
 
-    free(conns->arr);
-    free(conns);
+    PyMem_RawFree(conns->arr);
+    PyMem_RawFree(conns);
 
     return 0;
 
 }
 
-int32_t connarray_put(struct ConnArray *fd_to_conn, struct Conn *conn) {
+int32_t connarray_put(struct conn_array_t *fd_to_conn, struct conn_t *conn) {
 
     if (fd_to_conn->maxsize <= conn->fd) {
         int new_maxsize = CEIL(conn->fd + 1, 8);
-        struct Conn **newarr = calloc(new_maxsize, sizeof(struct Conn *));
+        struct conn_t **newarr = PyMem_RawCalloc(new_maxsize, sizeof(struct conn_t *));
         if (!newarr) {
-            log_error("connarray_put(): failed to calloc memory!");
+            log_error("connarray_put(): failed to PyMem_RawCalloc memory!");
             return -1;
         }
         for (int32_t ix = 0; ix < fd_to_conn->maxsize; ix++) {
@@ -79,7 +79,7 @@ int32_t connarray_put(struct ConnArray *fd_to_conn, struct Conn *conn) {
                 newarr[ix] = fd_to_conn->arr[ix];
             }
         }
-        free(fd_to_conn->arr);
+        PyMem_RawFree(fd_to_conn->arr);
         fd_to_conn->arr = newarr;
         fd_to_conn->maxsize = new_maxsize;
     }
@@ -91,7 +91,7 @@ int32_t connarray_put(struct ConnArray *fd_to_conn, struct Conn *conn) {
 
 }
 
-int32_t connarray_remove(struct ConnArray *fd_to_conn, struct Conn *conn) {
+int32_t connarray_remove(struct conn_array_t *fd_to_conn, struct conn_t *conn) {
 
     if (sem_trywait(conn->lock) < 0) {
         log_warning("poll_loop(): conn lock is locked for ended connection");
@@ -103,11 +103,11 @@ int32_t connarray_remove(struct ConnArray *fd_to_conn, struct Conn *conn) {
     
     fd_to_conn->arr[conn->fd] = NULL;
     close(conn->fd);
-    free(conn->rbuff);
-    free(conn->wbuff);
+    PyMem_RawFree(conn->rbuff);
+    PyMem_RawFree(conn->wbuff);
     sem_post(conn->lock);
     sem_destroy(conn->lock);
-    free(conn);
+    PyMem_RawFree(conn);
 
     fd_to_conn->size--;
 
@@ -115,7 +115,7 @@ int32_t connarray_remove(struct ConnArray *fd_to_conn, struct Conn *conn) {
 
 }
 
-int32_t accept_new_conn(struct ConnArray *fd_to_conn, int fd) {
+int32_t accept_new_conn(struct conn_array_t *fd_to_conn, int fd) {
 
     log_info("accept_new_conn(): got new connection");
 
@@ -133,7 +133,7 @@ int32_t accept_new_conn(struct ConnArray *fd_to_conn, int fd) {
     // set connfd to nonblocking mode
     fd_set_nb(connfd);
 
-    struct Conn *conn = conn_new(connfd);
+    struct conn_t *conn = conn_new(connfd);
     if (!conn) {
         log_error("accept_new_conn(): failed to allocate new connection!");
         return -1;
@@ -158,7 +158,7 @@ int32_t accept_new_conn(struct ConnArray *fd_to_conn, int fd) {
 
 }
 
-int32_t connection_io(foo_kv_server *server, struct Conn *conn) {
+int32_t connection_io(foo_kv_server *server, struct conn_t *conn) {
 
     #if _FOO_KV_DEBUG == 1
     char debug_buffer[256];
@@ -180,23 +180,10 @@ int32_t connection_io(foo_kv_server *server, struct Conn *conn) {
         sprintf(debug_buffer, "connection_io(): conn_fd: %d: another thread is already handling request, exiting", conn->fd);
         log_debug(debug_buffer);
         #endif
-        return -1;
+        return 0;
     }
     #if _FOO_KV_DEBUG == 1
     sprintf(debug_buffer, "connection_io(): conn_fd: %d: successfully acquired conn lock", conn->fd);
-    log_debug(debug_buffer);
-    sprintf(debug_buffer, "connection_io(): conn_fd: %d: about to acquire io_conns_lock", conn->fd);
-    log_debug(debug_buffer);
-    #endif
-    Py_BEGIN_ALLOW_THREADS
-    if (sem_wait(server->io_conns_sem)) {
-        log_error("connection_io(): sem_wait() failed");
-        conn->state = STATE_END;
-        return -1;
-    }
-    Py_END_ALLOW_THREADS
-    #if _FOO_KV_DEBUG == 1
-    sprintf(debug_buffer, "connection_io(): conn_fd: %d: successfully acquired io_conns_lock", conn->fd);
     log_debug(debug_buffer);
     #endif
     int32_t err;
@@ -243,14 +230,22 @@ int32_t connection_io(foo_kv_server *server, struct Conn *conn) {
                 #endif
                 err = -1;
                 goto CONNECTION_IO_END;
+            case STATE_TERM:
+                #if _FOO_KV_DEBUG == 1
+                sprintf(debug_buffer, "connection_io(): conn_fd: %d: got STATE_TERM, shouldn't get here", conn->fd);
+                log_error(debug_buffer);
+                #else
+                log_error("connection_io(): Got STATE_TERM, shouldn't get here");
+                #endif
+                err = 0;
+                goto CONNECTION_IO_END;
             default:
                 #if _FOO_KV_DEBUG == 1
                 sprintf(debug_buffer, "connection_io(): conn_fd: %d: Got invalid state", conn->fd);
-                log_debug(debug_buffer);
+                log_error(debug_buffer);
                 #else
                 log_error("connection_io(): Got invalid state");
                 #endif
-                conn->state = STATE_END;
                 err = -1;
                 goto CONNECTION_IO_END;
         }
@@ -260,33 +255,27 @@ CONNECTION_IO_END:
 
     if (sem_post(conn->lock)) {
         log_error("connection_io(): sem_post() failed");
-        conn->state = STATE_END;
-        return -1;
+        err = -1;
     }
     #if _FOO_KV_DEBUG == 1
     sprintf(debug_buffer, "connection_io(): conn_fd: %d: released conn lock", conn->fd);
     log_debug(debug_buffer);
     #endif
-    if (sem_post(server->io_conns_sem)) {
-        log_error("connection_io(): sem_post() failed");
-        conn->state = STATE_END;
-        return -1;
-    }
+
     #if _FOO_KV_DEBUG == 1
-    sprintf(debug_buffer, "connection_io(): conn_fd: %d: released io_conns_lock", conn->fd);
+    sprintf(debug_buffer, "connection_io(): conn_fd: %d: finished for conn: err: %d", conn->fd, err);
     log_debug(debug_buffer);
     #endif
 
-    #if _FOO_KV_DEBUG == 1
-    sprintf(debug_buffer, "connection_io(): conn_fd: %d: finished for conn with fd", conn->fd);
-    log_debug(debug_buffer);
-    #endif
+    if (err) {
+        conn->state = STATE_END;
+    }
 
     return err;
 
 }
 
-int32_t state_req(struct Conn *conn) {
+int32_t state_req(struct conn_t *conn) {
 
     #if _FOO_KV_DEBUG == 1
     log_debug("state_req(): beginning");
@@ -310,16 +299,18 @@ int32_t state_req(struct Conn *conn) {
 }
 
 
-int32_t try_fill_buffer(struct Conn *conn) {
+int32_t try_fill_buffer(struct conn_t *conn) {
     // returns a negative number on error
     // returns 0 to request stop iterating
     // returns 1 to request continue iterating
 
+    #if _FOO_KV_DEBUG == 1
     if (conn->rbuff_size > conn->rbuff_max) {
         log_error("try_fill_buffer(): assertion 1: conn->rbuff_size is out of sync with conn->rbuff_max");
         conn->state = STATE_END;
         return -1;
     }
+    #endif
 
     ssize_t rv = 0;
     do {
@@ -347,9 +338,19 @@ int32_t try_fill_buffer(struct Conn *conn) {
         //  1. try_one_request finds enough data to process a request, and will set the state to STATE_RES
         //  2. try_one_request will not find enough data, and we will move along to another connection
         #if _FOO_KV_DEBUG == 1
-        log_debug("try_fill_buffer(): no incoming data");
+        log_debug("try_fill_buffer(): no incoming data: checking if there is unread data in buffer");
         #endif
-        conn->state = STATE_REQ_WAITING;
+        if (conn->rbuff_read < conn->rbuff_size) {
+            #if _FOO_KV_DEBUG == 1
+            log_debug("try_fill_buffer(): data in buffer: continuing to try_one_request");
+            #endif
+            // need to not change state if we get here
+        } else {
+            #if _FOO_KV_DEBUG == 1
+            log_debug("try_fill_buffer(): no data in buffer");
+            #endif
+            conn->state = STATE_REQ_WAITING;
+        }
         return 0;
     }
 
@@ -357,7 +358,6 @@ int32_t try_fill_buffer(struct Conn *conn) {
         if (conn->rbuff_size > 0) {
             log_error("try_fill_buffer(): unexpected EOF");
         }
-        conn->state = STATE_END;
         return -1;
     }
 
@@ -365,7 +365,6 @@ int32_t try_fill_buffer(struct Conn *conn) {
 
     if (conn->rbuff_size > conn->rbuff_max) {
         log_error("try_fill_buffer(): assertion 2: conn->rbuff_size is out of sync with conn->rbuff_max");
-        conn->state = STATE_END;
         return -1;
     }
 
@@ -374,7 +373,7 @@ int32_t try_fill_buffer(struct Conn *conn) {
 }
 
 
-int32_t try_one_request(struct Conn *conn) {
+int32_t try_one_request(struct conn_t *conn) {
 
     // check if we have 4 bytes in rbuff
     // if not, we will try again next iteration
@@ -422,45 +421,39 @@ int32_t try_one_request(struct Conn *conn) {
 
 }
 
-int32_t state_dispatch(foo_kv_server *server, struct Conn *conn) {
+int32_t state_dispatch(foo_kv_server *server, struct conn_t *conn) {
 
     #if _FOO_KV_DEBUG == 1
     log_debug("state_dispatch(): beginning");
     #endif
 
     uint32_t len;
+    int32_t err;
     uint8_t *rbuff_start = conn->rbuff + conn->rbuff_read;
     memcpy(&len, rbuff_start, 4);
     rbuff_start += 4;
 
-    struct Response *response = dispatch(server, conn->connid, rbuff_start, len);
-    if (response == NULL) {
-        log_error("try_one_request(): dispatch returned null");
-        struct Response *err_response = calloc(1, sizeof(struct Response));
-        err_response->status = RES_UNKNOWN;
-        err_response->datalen = 0;
-
-        conn_write_response(conn, err_response);
-        free(err_response);
-    } else {
-        conn_write_response(conn, response);
-        free(response);
+    struct response_t *response = PyMem_RawCalloc(1, sizeof(struct response_t));
+    if (!response) {
+        log_error("state_dispatch(): calloc returned null");
+        return -1;
     }
 
-    conn->rbuff_read += len + 4;
+    err = dispatch(server, conn->connid, rbuff_start, len, response);
+    conn_write_response(conn, response);
+    PyMem_RawFree(response);
 
-    // reset rbuff
-    // TODO figure out how to handle this
-    //conn_flush(conn, flushsize);
+    // 4 for the len indicator + rest of message
+    conn->rbuff_read += 4 + len;
 
     // change state
     conn->state = STATE_RES;
 
-    return 0;
+    return err;
 
 }
 
-int32_t state_res(struct Conn *conn) {
+int32_t state_res(struct conn_t *conn) {
 
     #if _FOO_KV_DEBUG == 1
     log_debug("state_res(): beginning");
@@ -471,7 +464,18 @@ int32_t state_res(struct Conn *conn) {
 
 }
 
-int32_t try_flush_buffer(struct Conn *conn) {
+int32_t try_flush_buffer(struct conn_t *conn) {
+
+    #if _FOO_KV_DEBUG == 1
+    if (conn->wbuff_size <= conn->wbuff_sent) {
+        log_error("try_flush_buffer(): assertion 1 failed");
+        return 0;
+    }
+    if (conn->wbuff_max < conn->wbuff_size) {
+        log_error("try_flush_buffer(): assertion 2 failed");
+        return 0;
+    }
+    #endif
 
     ssize_t rv = 0;
     do {

@@ -33,25 +33,29 @@ static PyObject *foo_kv_server_tp_new(PyTypeObject *subtype, PyObject *args, PyO
 
 static void foo_kv_server_tp_clear(foo_kv_server *self) {
 
+    #if _FOO_KV_DEBUG == 1
+    log_warning("five_one_one_kv.server is being cleared!!!");
+    #endif
+
     Py_DECREF(self->storage);
-    Py_DECREF(self->storage_lock);
     Py_DECREF(self->user_locks);
     Py_DECREF(self->user_locks_lock);
 
-    sem_destroy(&self->waiting_conns_ready_cond->acq_lock);
-    sem_destroy(&self->waiting_conns_ready_cond->notify_lock);
-    free(self->waiting_conns_ready_cond);
+    PyMem_RawFree(self->waiting_conns_ready_cond);
 
+    sem_destroy(self->storage_lock);
     sem_destroy(self->waiting_conns_lock);
-    free(self->waiting_conns_lock);
-    sem_destroy(self->io_conns_sem);
-    free(self->io_conns_sem);
+    PyMem_RawFree(self->waiting_conns_lock);
 
     connarray_dealloc(self->fd_to_conn);
 
 }
 
 static void foo_kv_server_tp_dealloc(foo_kv_server *self) {
+
+    #if _FOO_KV_DEBUG == 1
+    log_warning("five_one_one_kv.server is being deallocated!!!");
+    #endif
 
     foo_kv_server_tp_clear(self);
     Py_TYPE(self)->tp_free((PyObject *)self);
@@ -91,8 +95,11 @@ static int foo_kv_server_tp_init(foo_kv_server *self, PyObject *args, PyObject *
     if (!self->storage) {
         return -1;
     }
-    self->storage_lock = PyObject_CallNoArgs(_threading_lock);
+    self->storage_lock = PyMem_RawCalloc(1, sizeof(sem_t));
     if (!self->storage_lock) {
+        return -1;
+    }
+    if (sem_init(self->storage_lock, 0, 1)) {
         return -1;
     }
     self->user_locks = PyDict_New();
@@ -107,21 +114,17 @@ static int foo_kv_server_tp_init(foo_kv_server *self, PyObject *args, PyObject *
     if (!self->waiting_conns) {
         return -1;
     }
-    self->waiting_conns_lock = calloc(1, sizeof(sem_t));
+    self->waiting_conns_lock = PyMem_RawCalloc(1, sizeof(sem_t));
     if (!self->waiting_conns_lock) {
         return -1;
     }
-    sem_init(self->waiting_conns_lock, 0, 1);
+    if (sem_init(self->waiting_conns_lock, 0, 1)) {
+        return -1;
+    }
     self->waiting_conns_ready_cond = cond_new();
     if (!self->waiting_conns_ready_cond) {
         return -1;
     }
-    // we have 1 thread for polling and num_threads-1 for io workers
-    self->io_conns_sem = calloc(1, sizeof(sem_t));
-    if (!self->io_conns_sem) {
-        return -1;
-    }
-    sem_init(self->io_conns_sem, 0, num_threads - 1);
 
     // return value for io operations
     int rv;
@@ -185,9 +188,9 @@ static int foo_kv_server_tp_init(foo_kv_server *self, PyObject *args, PyObject *
     log_debug("got past listen()");
     #endif
 
-    self->fd_to_conn = calloc(1, sizeof(struct ConnArray));
+    self->fd_to_conn = PyMem_RawCalloc(1, sizeof(struct conn_array_t));
     if (connarray_init(self->fd_to_conn, 8)) {
-        log_error("calloc() failed to allocate memory");
+        log_error("PyMem_RawCalloc() failed to allocate memory");
         return -1;
     }
     
@@ -206,7 +209,26 @@ static PyObject *foo_kv_function_dumps(PyObject *self, PyObject *const *args, Py
         return NULL;
     }
 
+    if (ensure_py_deps()) {
+        return NULL;
+    }
+
     return dumps_as_pyobject(args[0]);
+
+}
+
+static PyObject *foo_kv_function_dumps_hashable(PyObject *self, PyObject *const *args, Py_ssize_t nargs) {
+
+    if (nargs != 1) {
+        PyErr_SetString(PyExc_TypeError, "wrong number of arguments to `dumps_hashable`, expects 1.");
+        return NULL;
+    }
+
+    if (ensure_py_deps()) {
+        return NULL;
+    }
+
+    return _dumps_hashable_as_pyobject(args[0]);
 
 }
 
@@ -217,7 +239,26 @@ static PyObject *foo_kv_function_loads(PyObject *self, PyObject *const *args, Py
         return NULL;
     }
 
+    if (ensure_py_deps()) {
+        return NULL;
+    }
+
     return loads_from_pyobject(args[0]);
+
+}
+
+static PyObject *foo_kv_function_loads_hashable(PyObject *self, PyObject *const *args, Py_ssize_t nargs) {
+
+    if (nargs != 1) {
+        PyErr_SetString(PyExc_TypeError, "wrong number of arguments to `loads_hashable`, expects 1.");
+        return NULL;
+    }
+
+    if (ensure_py_deps()) {
+        return NULL;
+    }
+
+    return _loads_hashable_from_pyobject(args[0]);
 
 }
 
@@ -270,10 +311,10 @@ static PyObject *foo_kv_server_tp_method_io_loop(PyObject *self, PyObject *const
 // helper methods
 static void *poll_loop(foo_kv_server *kv_self) {
 
-    struct ConnArray *fd_to_conn = kv_self->fd_to_conn;
+    struct conn_array_t *fd_to_conn = kv_self->fd_to_conn;
 
     nfds_t poll_args_size = 0;
-    struct pollfd *poll_args = (struct pollfd *)calloc(1, sizeof(struct pollfd));
+    struct pollfd *poll_args = (struct pollfd *)PyMem_RawCalloc(1, sizeof(struct pollfd));
 
     int32_t has_lock;
     // keep track of number of active connections
@@ -298,8 +339,8 @@ static void *poll_loop(foo_kv_server *kv_self) {
         #endif
         num_active = 0;
 
-        free(poll_args); 
-        poll_args = calloc(fd_to_conn->size + 1, sizeof(struct pollfd));
+        PyMem_RawFree(poll_args); 
+        poll_args = PyMem_RawCalloc(fd_to_conn->size + 1, sizeof(struct pollfd));
         poll_args_size = 0;
 
         // for convenience, the listening fd is put in the first position
@@ -309,7 +350,7 @@ static void *poll_loop(foo_kv_server *kv_self) {
 
         // connection fds
         for (int32_t ix = 0; ix < fd_to_conn->maxsize; ix++) {
-            struct Conn *conn = fd_to_conn->arr[ix];
+            struct conn_t *conn = fd_to_conn->arr[ix];
             if (!conn) {
                 continue;
             }
@@ -368,32 +409,12 @@ static void *poll_loop(foo_kv_server *kv_self) {
         }
 
         #if _FOO_KV_POLL_DEBUG == 1
-        sprintf(debug_buff, "poll_loop(): got %d/%d connections with active requests, %d waiting connections, %d total connections",
+        sprintf(debug_buff, "poll_loop(): got %d/%d active io workers, %d waiting connections, %d total connections",
                 num_active, max_io_workers, (int)poll_args_size - 1, fd_to_conn->size);
         log_debug(debug_buff);
         #endif
 
         // poll for active fds
-        // Acquire Sem: this is intended to introduce sleep time if all other
-        // threads are busy
-        struct timespec sem_timeout;
-        sem_timeout.tv_sec = 1;
-        sem_timeout.tv_nsec = 0;
-        if (!sem_timedwait(kv_self->io_conns_sem, &sem_timeout)) {
-            // cannot make python calls between acquiring sem and releasing it
-            if (sem_post(kv_self->io_conns_sem)) {
-                log_error("poll_loop(): sem_post() failed");
-                return NULL;
-            }
-            #if _FOO_KV_POLL_DEBUG
-            log_debug("poll_loop(): acquired io_conns_sem, this means io loop is not saturated.");
-            log_debug("poll_loop(): released io_conns_sem");
-            #endif
-        } else {
-            #if _FOO_KV_POLL_DEBUG
-            log_debug("poll_loop(): did not acquire io_conns_sem, this means io loop is saturated.");
-            #endif
-        }
         poll_timeout = 1000;
         #if _FOO_KV_POLL_DEBUG
         sprintf(debug_buff, "poll_loop: about to call poll(timeout=%d)", poll_timeout);
@@ -414,71 +435,119 @@ static void *poll_loop(foo_kv_server *kv_self) {
         // process active connections
         // TODO comments
         for (nfds_t ix = 1; ix < poll_args_size; ix++) {
-            if (poll_args[ix].revents) {
-                struct Conn *conn = fd_to_conn->arr[poll_args[ix].fd];
-                if (!conn) {
-                    log_error("poll_loop(): connection object of active fd became null");
-                    continue;
+            if (!poll_args[ix].revents) {
+                continue;
+            }
+            struct conn_t *conn = fd_to_conn->arr[poll_args[ix].fd];
+            if (!conn) {
+                log_error("poll_loop(): connection object of active fd became null");
+                continue;
+            }
+            has_lock = sem_trywait(conn->lock);
+            if (has_lock < 0) {
+                if (errno == EINVAL) {
+                    log_error("poll_loop(): sem_trywait() failed");
+                    return NULL;
                 }
-                has_lock = sem_trywait(conn->lock);
-                if (has_lock < 0) {
-                    if (errno == EINVAL) {
-                        log_error("poll_loop(): sem_trywait() failed");
-                        return NULL;
-                    }
-                    log_warning("poll_loop(): conn lock is locked for idle connection");
-                    continue;
+                log_warning("poll_loop(): conn lock is locked for idle connection");
+                continue;
+            }
+            int32_t is_waiting = 0;
+            if (conn->state == STATE_REQ_WAITING) {
+                conn->state = STATE_REQ;
+                is_waiting = 1;
+            } else if (conn->state == STATE_RES_WAITING) {
+                conn->state = STATE_RES;
+                is_waiting = 1;
+            }
+            if (sem_post(conn->lock)) {
+                log_error("poll_loop(): sem_post() failed");
+                return NULL;
+            }
+            if (is_waiting) {
+                #if _FOO_KV_POLL_DEBUG == 1
+                sprintf(debug_buff, "poll_loop(): conn_fd: %d: about to acquire waiting_conns_lock", conn->fd);
+                log_debug(debug_buff);
+                #endif
+                if (threadsafe_sem_wait(kv_self->waiting_conns_lock)) {
+                    log_error("poll_loop(): sem_wait() failed");
+                    return NULL;
                 }
-                int32_t is_waiting = 0;
-                if (conn->state == STATE_REQ_WAITING) {
-                    conn->state = STATE_REQ;
-                    is_waiting = 1;
-                } else if (conn->state == STATE_RES_WAITING) {
-                    conn->state = STATE_RES;
-                    is_waiting = 1;
+                #if _FOO_KV_POLL_DEBUG == 1
+                sprintf(debug_buff, "poll_loop(): conn_fd: %d: successfully acquired waiting_conns_lock", conn->fd);
+                log_debug(debug_buff);
+                #endif
+                if (intq_put(kv_self->waiting_conns, conn->fd)) {
+                    log_error("poll_loop(): failed to enqueue connection");
+                    return NULL;
                 }
-                if (sem_post(conn->lock)) {
+
+                if (sem_post(kv_self->waiting_conns_lock)) {
                     log_error("poll_loop(): sem_post() failed");
                     return NULL;
                 }
-                if (is_waiting) {
-                    #if _FOO_KV_POLL_DEBUG == 1
-                    sprintf(debug_buff, "poll_loop(): conn_fd: %d: about to acquire waiting_conns_lock", conn->fd);
-                    log_debug(debug_buff);
-                    #endif
-                    Py_BEGIN_ALLOW_THREADS
-                    if (sem_wait(kv_self->waiting_conns_lock)) {
-                        log_error("poll_loop(): sem_wait() failed");
-                        return NULL;
-                    }
-                    Py_END_ALLOW_THREADS
-                    #if _FOO_KV_POLL_DEBUG == 1
-                    sprintf(debug_buff, "poll_loop(): conn_fd: %d: successfully acquired waiting_conns_lock", conn->fd);
-                    log_debug(debug_buff);
-                    #endif
-                    if (intq_put(kv_self->waiting_conns, conn->fd)) {
-                        log_error("poll_loop(): failed to enqueue connection");
-                        return NULL;
-                    }
+                #if _FOO_KV_POLL_DEBUG == 1
+                sprintf(debug_buff, "poll_loop(): conn_fd: %d: released waiting_conns_lock", conn->fd);
+                log_debug(debug_buff);
+                #endif
 
-                    if (sem_post(kv_self->waiting_conns_lock)) {
-                        log_error("poll_loop(): sem_post() failed");
-                        return NULL;
-                    }
-                    #if _FOO_KV_POLL_DEBUG == 1
-                    sprintf(debug_buff, "poll_loop(): conn_fd: %d: released waiting_conns_lock", conn->fd);
-                    log_debug(debug_buff);
-                    #endif
+                // notify other threads that a connection is ready
+                if (cond_notify(kv_self->waiting_conns_ready_cond)) {
+                    log_error("poll_loop(): cond_notify() failed.");
+                    return NULL;
+                }
 
-                    // notify other threads that a connection is ready
-                    if (cond_notify(kv_self->waiting_conns_ready_cond)) {
-                        log_error("poll_loop(): cond_notify() failed.");
-                        return NULL;
-                    }
+                #if _FOO_KV_POLL_DEBUG == 1
+                sprintf(debug_buff, "poll_loop(): conn_fd: %d: notified waiting_conns_ready_cond", conn->fd);
+                log_debug(debug_buff);
+                #endif
 
-                } // end of is waiting block
-            } // end of is events
+            } // end of is waiting block
+
         } // end of loop
+
+        int32_t is_queue_empty = 0;
+
+        // give another notify, just to be safe
+        #if _FOO_KV_POLL_DEBUG == 1
+        sprintf(debug_buff, "poll_loop(): check waiting conns queue: about to acquire waiting_conns_lock");
+        log_debug(debug_buff);
+        #endif
+        if (threadsafe_sem_wait(kv_self->waiting_conns_lock)) {
+            log_error("poll_loop(): sem_wait() failed");
+            return NULL;
+        }
+        #if _FOO_KV_POLL_DEBUG == 1
+        sprintf(debug_buff, "poll_loop(): check waiting conns queue: successfully acquired waiting_conns_lock");
+        log_debug(debug_buff);
+        #endif
+        is_queue_empty = intq_empty(kv_self->waiting_conns);
+
+        if (sem_post(kv_self->waiting_conns_lock)) {
+            log_error("poll_loop(): sem_post() failed");
+            return NULL;
+        }
+        #if _FOO_KV_POLL_DEBUG == 1
+        sprintf(debug_buff, "poll_loop(): check waiting conns queue: released waiting_conns_lock");
+        log_debug(debug_buff);
+        #endif
+
+        // notify other threads that a connection is ready
+        if (!is_queue_empty) {
+            #if _FOO_KV_POLL_DEBUG == 1
+            sprintf(debug_buff, "poll_loop(): check waiting conns queue: queue is not empty, notifying");
+            log_debug(debug_buff);
+            #endif
+            if (cond_notify(kv_self->waiting_conns_ready_cond)) {
+                log_error("poll_loop(): cond_notify() failed.");
+                return NULL;
+            }
+        } else {
+            #if _FOO_KV_POLL_DEBUG == 1
+            sprintf(debug_buff, "poll_loop(): check waiting conns queue: queue is empty, not notifying");
+            log_debug(debug_buff);
+            #endif
+        }
 
         #if _FOO_KV_POLL_DEBUG == 1
         log_debug("poll_loop(): about to accept new connections");
@@ -501,7 +570,7 @@ static void *poll_loop(foo_kv_server *kv_self) {
 
 static void *io_loop(foo_kv_server *kv_self) {
 
-    struct ConnArray *fd_to_conn = kv_self->fd_to_conn;
+    struct conn_array_t *fd_to_conn = kv_self->fd_to_conn;
 
     #if _FOO_KV_IO_DEBUG == 1
     char debug_buff[256];
@@ -518,12 +587,10 @@ static void *io_loop(foo_kv_server *kv_self) {
         #if _FOO_KV_IO_DEBUG == 1
         log_debug("io_loop(): about to acquire waiting_conns_lock");
         #endif
-        Py_BEGIN_ALLOW_THREADS
-        if (sem_wait(kv_self->waiting_conns_lock)) {
+        if (threadsafe_sem_wait(kv_self->waiting_conns_lock)) {
             log_error("io_loop(): sem_wait() failed");
             return NULL;
         }
-        Py_END_ALLOW_THREADS
         #if _FOO_KV_IO_DEBUG == 1
         log_debug("io_loop(): successfully acquired waiting_conns_lock");
         #endif
@@ -556,12 +623,10 @@ static void *io_loop(foo_kv_server *kv_self) {
             #if _FOO_KV_IO_DEBUG == 1
             log_debug("io_loop(): about to acquire waiting_conns_lock");
             #endif
-            Py_BEGIN_ALLOW_THREADS
-            if (sem_wait(kv_self->waiting_conns_lock)) {
+            if (threadsafe_sem_wait(kv_self->waiting_conns_lock)) {
                 log_error("io_loop(): sem_wait() failed");
                 return NULL;
             }
-            Py_END_ALLOW_THREADS
             #if _FOO_KV_IO_DEBUG == 1
             log_debug("io_loop(): successfully acquired waiting_conns_lock");
             #endif
@@ -594,7 +659,7 @@ static void *io_loop(foo_kv_server *kv_self) {
             log_error("io_loop(): failed get from deque: this should never happen if the empty checks and locks worked as intended");
             return NULL;
         }
-        struct Conn *conn = fd_to_conn->arr[conn_fd];
+        struct conn_t *conn = fd_to_conn->arr[conn_fd];
         if (!conn) {
             #if _FOO_KV_IO_DEBUG == 1
             sprintf(debug_buff, "io_loop(): conn_fd: %d: pop from waiting conns queue corresponds to null connection, perhaps this is expected", conn_fd);
@@ -688,7 +753,9 @@ static PyTypeObject FooKVServerType = {
 // define our module methods
 static PyMethodDef foo_kv_method_def[] = {
     {"dumps", _PyCFunction_CAST(foo_kv_function_dumps), METH_FASTCALL, "Serialize user data."},
+    {"dumps_hashable", _PyCFunction_CAST(foo_kv_function_dumps_hashable), METH_FASTCALL, "Serialize user data, enforces hashable."},
     {"loads", _PyCFunction_CAST(foo_kv_function_loads), METH_FASTCALL, "Deserialize user data."},
+    {"loads_hashable", _PyCFunction_CAST(foo_kv_function_loads_hashable), METH_FASTCALL, "Deserialize user data, enforces hashable."},
     {"foo_hash", _PyCFunction_CAST(foo_kv_function_hash), METH_FASTCALL, "Get the hash of the user data."},
     {NULL, NULL, 0, NULL}
 };
