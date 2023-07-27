@@ -2,6 +2,7 @@ import collections
 import io
 import socket
 import struct
+import logging
 from typing import Any, Tuple, Union
 
 from five_one_one_kv.c import (
@@ -13,6 +14,7 @@ from five_one_one_kv.c import (
     RES_BAD_KEY,
     RES_BAD_OP,
     RES_BAD_TYPE,
+    RES_BAD_COLLECTION,
     RES_ERR_CLIENT,
     RES_ERR_SERVER,
     RES_OK,
@@ -27,7 +29,11 @@ from five_one_one_kv.exceptions import (
     NotEnoughDataError,
     NotHashableError,
     ServerError,
+    TooLargeError,
 )
+
+logger = logging.getLogger(__name__)
+
 
 PIPE_UNSTARTED = 0
 PIPE_CONTEXT_MODE = 1
@@ -35,28 +41,28 @@ PIPE_NONCONTEXT_MODE = 2
 PIPE_FINISHED = 3
 
 
-_SINGLEOFFSET = struct.calcsize("=i")
-_DOUBLEOFFSET = struct.calcsize("=ii")
+_SINGLEOFFSET = struct.calcsize("=H")
+_DOUBLEOFFSET = struct.calcsize("=HH")
 
 
 def _pack(*args) -> bytes:
     """
     Wrapper for creating C struct of args.
     """
-    struct_fmt_list = ["=", "i"]
+    struct_fmt_list = ["=", "H", "H"]
     struct_args = [len(args)]
     for arg in args:
         arg_len = len(arg)
-        struct_fmt_list.append("i")
+        struct_fmt_list.append("H")
         struct_args.append(arg_len)
         struct_fmt_list.append(f"{arg_len}s")
         struct_args.append(arg)
-    total_len = struct.calcsize("".join(struct_fmt_list))
-    struct_fmt_list.insert(1, "i")
+    fmt = "".join(struct_fmt_list)
+    total_len = struct.calcsize(fmt) - _SINGLEOFFSET
     try:
-        return struct.pack("".join(struct_fmt_list), total_len, *struct_args)
+        return struct.pack(fmt, total_len, *struct_args)
     except struct.error:
-        raise ClientError
+        raise TooLargeError("Tried to send a message to the server that was too large.")
 
 
 def _unpack(res: bytes) -> Tuple[int, bytes]:
@@ -67,14 +73,14 @@ def _unpack(res: bytes) -> Tuple[int, bytes]:
         raise NotEnoughDataError
     # unpack expected response len
     try:
-        (msg_len,) = struct.unpack_from("=i", res)
+        (msg_len,) = struct.unpack_from("=H", res)
     except struct.error:
         raise ServerError
     if msg_len <= 0:
         raise ServerError
     # unpack response status
     try:
-        (status,) = struct.unpack_from("=i", res, offset=_SINGLEOFFSET)
+        (status,) = struct.unpack_from("=H", res, offset=_SINGLEOFFSET)
     except struct.error:
         raise ServerError
     # unpack data
@@ -98,7 +104,7 @@ def _unpack_from(res: bytes, offset=0) -> Tuple[int, bytes, int]:
         raise NotEnoughDataError
     # unpack expected response len
     try:
-        (msg_len,) = struct.unpack_from("=i", res, offset=offset)
+        (msg_len,) = struct.unpack_from("=H", res, offset=offset)
     except struct.error:
         raise ServerError
     if msg_len <= 0:
@@ -106,7 +112,7 @@ def _unpack_from(res: bytes, offset=0) -> Tuple[int, bytes, int]:
     offset += _SINGLEOFFSET
     # unpack response status
     try:
-        (status,) = struct.unpack_from("=i", res, offset=offset)
+        (status,) = struct.unpack_from("=H", res, offset=offset)
     except struct.error:
         raise ServerError
     offset += _SINGLEOFFSET
@@ -142,6 +148,7 @@ _code_to_exc[RES_BAD_OP] = AttributeError(
 )
 _code_to_exc[RES_BAD_IX] = IndexError("")
 _code_to_exc[RES_BAD_HASH] = TypeError("Tried to send an unhashable type as a key")
+_code_to_exc[RES_BAD_COLLECTION] = TypeError("Cannot embed a collection in another collection.")
 
 
 class Client:

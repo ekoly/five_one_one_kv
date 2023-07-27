@@ -11,13 +11,10 @@
 
 #include <Python.h>
 
-// CHANGE ME
-#define _FOO_KV_DEBUG 1
-
 #define DEFAULT_MSG_SIZE 4096
-#define MAX_MSG_SIZE 65536
-#define MAX_KEY_SIZE 1024
-#define MAX_VAL_SIZE MAX_MSG_SIZE - 2048
+#define MAX_MSG_SIZE 65535  // 2**16 - 1
+#define MAX_KEY_SIZE 1024  // not currently enforced
+#define MAX_VAL_SIZE MAX_MSG_SIZE - 2048  // not currently enforced
 #define CEIL(x, y) ((y) * ((x) / (y) + ((x) % (y) != 0)))
 
 #define INTQ_NODE_SIZE 16
@@ -60,6 +57,7 @@ extern PyObject *_float_symbol;
 extern PyObject *_bytes_symbol;
 extern PyObject *_string_symbol;
 extern PyObject *_list_symbol;
+extern PyObject *_tuple_symbol;
 extern PyObject *_bool_symbol;
 extern PyObject *_json_kwargs;
 extern PyObject *_json_loads_f;
@@ -73,9 +71,10 @@ extern PyObject *_not_hashable_error;
 
 #define INT_SYMBOL '#'
 #define FLOAT_SYMBOL '%'
-#define BYTES_SYMBOL 'b'
-#define STRING_SYMBOL 'u'
+#define BYTES_SYMBOL '\''
+#define STRING_SYMBOL '"'
 #define LIST_SYMBOL '['
+#define TUPLE_SYMBOL '('
 #define BOOL_SYMBOL '?'
 
 // this sets the above cached objects
@@ -100,7 +99,8 @@ enum {
 
 struct conn_t {
     int fd;
-    uint32_t state;
+    int32_t state;
+    int32_t err;
     size_t rbuff_size;
     size_t rbuff_read;
     size_t rbuff_max;
@@ -115,22 +115,34 @@ struct conn_t {
 };
 
 struct response_t {
-    int32_t status;
-    uint8_t *data;
-    int32_t datalen;
+    int16_t status;
+    PyObject *payload;
 };
 
-extern const int RES_OK; // expected result
-extern const int RES_UNKNOWN; // catch-all for unknown errors
-extern const int RES_ERR_SERVER; // server messed up 
-extern const int RES_ERR_CLIENT; // server blames client
-extern const int RES_BAD_CMD; // command not found
-extern const int RES_BAD_TYPE; // type not found
-extern const int RES_BAD_KEY; // key not found
-extern const int RES_BAD_ARGS; // bad args for the command
-extern const int RES_BAD_OP; // bad operation, ex. INC on not int
-extern const int RES_BAD_IX; // index out of bound for list/queue commands
-extern const int RES_BAD_HASH; // index out of bound for list/queue commands
+// expected result
+#define RES_OK 0 
+// catch-all for unknown errors
+#define RES_UNKNOWN 11 
+// server messed up
+#define RES_ERR_SERVER 21 
+// server blames client
+#define RES_ERR_CLIENT 22 
+// command not found
+#define RES_BAD_CMD 31 
+// type not found
+#define RES_BAD_TYPE 32 
+// key not found
+#define RES_BAD_KEY 33 
+// bad args for the command
+#define RES_BAD_ARGS 34 
+// bad operation, ex. INC on not int
+#define RES_BAD_OP 35 
+// index out of bound for list/queue commands
+#define RES_BAD_IX 36 
+// index out of bound for list/queue commands
+#define RES_BAD_HASH 37
+// embedded collection
+#define RES_BAD_COLLECTION 38
 
 // basic utils
 void log_error(const char *msg);

@@ -2,10 +2,12 @@
 #ifndef _FOO_KV_MODULE_H
 #define _FOO_KV_MODULE_H
 
+// CHANGE ME
+#define _FOO_KV_DEBUG 0
 // there is a consistently reproducible segfault when _FOO_KV_POLL_DEBUG is 0
-#define _FOO_KV_POLL_DEBUG 0
+#define _FOO_KV_POLL_DEBUG 1
 // _FOO_KV_IO_DEBUG can be left as 0 in most circumstances
-#define _FOO_KV_IO_DEBUG 0
+#define _FOO_KV_IO_DEBUG 1
 
 #include <Python.h>
 

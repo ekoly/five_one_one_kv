@@ -47,6 +47,7 @@ PyObject *_float_symbol = NULL;
 PyObject *_bytes_symbol = NULL;
 PyObject *_string_symbol = NULL;
 PyObject *_list_symbol = NULL;
+PyObject *_tuple_symbol = NULL;
 PyObject *_bool_symbol = NULL;
 PyObject *_json_kwargs = NULL;
 PyObject *_json_loads_f = NULL;
@@ -59,55 +60,67 @@ PyObject *_embedded_collection_error = NULL;
 PyObject *_not_hashable_error = NULL;
 
 
-// response status codes
-const int RES_OK = 0; // expected result
-const int RES_UNKNOWN = 11; // catch-all for unknown errors
-const int RES_ERR_SERVER = 21; // server messed up
-const int RES_ERR_CLIENT = 22; // server blames client
-const int RES_BAD_CMD = 31; // command not found
-const int RES_BAD_TYPE = 32; // type not found
-const int RES_BAD_KEY = 33; // key not found
-const int RES_BAD_ARGS = 34; // bad args for the command
-const int RES_BAD_OP = 35; // bad operation, ex. INC on not int
-const int RES_BAD_IX = 36; // index out of bound for list/queue commands
-const int RES_BAD_HASH = 37; // index out of bound for list/queue commands
-
-
 // error handling
-void log_error(const char *msg) {
+void log_msg(const char *msg, PyObject *method) {
+    Py_INCREF(_logger);
+    Py_INCREF(method);
     PyObject *py_msg = PyUnicode_FromString(msg);
-    PyObject *res = PyObject_CallMethodOneArg(_logger, _error_str, py_msg);
+    PyObject *res = PyObject_CallMethodOneArg(_logger, method, py_msg);
     Py_DECREF(py_msg);
-    if (res != NULL) {
-        Py_DECREF(res);
+    Py_DECREF(_logger);
+    Py_DECREF(method);
+    if (!res) {
+        fprintf(stderr, "log_msg(): logging failed! msg: %s\n", msg);
+        PyObject *py_err = PyErr_Occurred();
+        if (py_err) {
+            Py_INCREF(_string_class);
+            PyObject *py_err_str = PyObject_CallOneArg(_string_class, py_err);
+            if (py_err_str) {
+                PyObject *py_err_bytes = PyUnicode_AsEncodedString(py_err_str, "utf-8", "ignore");
+                Py_DECREF(py_err_str);
+                if (py_err_bytes) {
+                    const char *err_str = PyBytes_AS_STRING(py_err_bytes);
+                    Py_DECREF(py_err_bytes);
+                    if (err_str) {
+                        fprintf(stderr, "log_msg(): reason for failure: %s\n", err_str);
+                    } else {
+                        fprintf(stderr, "log_msg(): python error was not castable to string\n");
+                    }
+                } else {
+                    fprintf(stderr, "log_msg(): could not encode reason for failure\n");
+                }
+                Py_DECREF(_string_class);
+                if (PyErr_Occurred()) {
+                    PyErr_Clear();
+                }
+            } else {
+                fprintf(stderr, "log_msg(): could not retrieve reason for failure\n");
+                if (PyErr_Occurred()) {
+                    PyErr_Clear();
+                }
+            }
+        } else {
+            fprintf(stderr, "log_msg(): no python error was raised by logger\n");
+        }
     }
+    Py_DECREF(res);
+    return;
+}
+
+void log_error(const char *msg) {
+    log_msg(msg, _error_str);
 }
 
 void log_warning(const char *msg) {
-    PyObject *py_msg = PyUnicode_FromString(msg);
-    PyObject *res = PyObject_CallMethodOneArg(_logger, _warning_str, py_msg);
-    Py_DECREF(py_msg);
-    if (res != NULL) {
-        Py_DECREF(res);
-    }
+    log_msg(msg, _warning_str);
 }
 
 void log_info(const char *msg) {
-    PyObject *py_msg = PyUnicode_FromString(msg);
-    PyObject *res = PyObject_CallMethodOneArg(_logger, _info_str, py_msg);
-    Py_DECREF(py_msg);
-    if (res != NULL) {
-        Py_DECREF(res);
-    }
+    log_msg(msg, _info_str);
 }
 
 void log_debug(const char *msg) {
-    PyObject *py_msg = PyUnicode_FromString(msg);
-    PyObject *res = PyObject_CallMethodOneArg(_logger, _debug_str, py_msg);
-    Py_DECREF(py_msg);
-    if (res != NULL) {
-        Py_DECREF(res);
-    }
+    log_msg(msg, _debug_str);
 }
 
 void die(const char *msg) {
@@ -200,6 +213,7 @@ struct conn_t *conn_new(int connfd) {
     }
     conn->fd = connfd;
     conn->state = STATE_REQ_WAITING;
+    conn->err = 0;
     conn->rbuff_size = 0;
     conn->rbuff_read = 0;
     conn->rbuff_max = DEFAULT_MSG_SIZE;
@@ -328,14 +342,16 @@ int32_t conn_write_response(struct conn_t *conn, const struct response_t *respon
     // we should never get here if in state STATE_RES_WAITING
     // therefore wbuff should always be flushed
 
-    // 4 for status + rest for data
-    int32_t wlen = 4 + response->datalen;
-    // additional 4 for initial len
-    size_t wbuff_size = 4 + wlen;
+    // payload
+    int32_t payloadlen = (response->payload) ? PyBytes_GET_SIZE(response->payload) : 0;
+    // 2 for status + rest for data
+    uint32_t msglen = sizeof(uint16_t) + payloadlen;
+    // additional 2 for initial len
+    uint32_t required_wbuff_size = sizeof(uint16_t) + msglen;
 
     // resize if necessary
-    if (wbuff_size > conn->wbuff_max) {
-        size_t newsize = CEIL(wbuff_size + 1, 1024);
+    if (required_wbuff_size > conn->wbuff_max) {
+        uint32_t newsize = CEIL(required_wbuff_size + 1, 1024);
         if (newsize > MAX_MSG_SIZE) {
             log_error("conn_write_response(): got response larger than max allowed size");
             return -1;
@@ -345,16 +361,29 @@ int32_t conn_write_response(struct conn_t *conn, const struct response_t *respon
         }
     }
 
-    // write the response len
-    memcpy(conn->wbuff, &wlen, 4);
-    // write the response status
-    memcpy(conn->wbuff + 4, &response->status, 4);
-    // write the data
-    if (response->datalen > 0) {
-        memcpy(conn->wbuff + 8, response->data, response->datalen);
+    #if _FOO_KV_DEBUG == 1
+    char debug_buff[256];
+    sprintf(debug_buff, "conn_write_response(): got response with status: %hd", response->status);
+    log_debug(debug_buff);
+    if (response->payload) {
+        sprintf(debug_buff, "conn_write_response(): got response with data: %s", PyBytes_AS_STRING(response->payload));
+        log_debug(debug_buff);
     }
-    // update `wbuff_size` and `wbuff_sent`
-    conn->wbuff_size = wbuff_size;
+    #endif
+
+    uint16_t wmsglen = msglen;
+
+    // write the response len
+    memcpy(conn->wbuff, &wmsglen, sizeof(uint16_t));
+    // write the response status
+    memcpy(conn->wbuff + sizeof(uint16_t), &response->status, sizeof(int16_t));
+    // write the data
+    if (response->payload) {
+        memcpy(conn->wbuff + sizeof(uint16_t) * 2, PyBytes_AS_STRING(response->payload), payloadlen);
+        Py_DECREF(response->payload);
+    }
+    // update `wbuff_size`
+    conn->wbuff_size = required_wbuff_size;
 
     return 0;
 
@@ -533,6 +562,10 @@ int32_t ensure_py_deps() {
     if (list_class == NULL) {
         return -1;
     }
+    PyObject *tuple_class = PyDict_GetItemString(_builtins, "tuple");
+    if (tuple_class == NULL) {
+        return -1;
+    }
     PyObject *bool_class = PyDict_GetItemString(_builtins, "bool");
     if (bool_class == NULL) {
         return -1;
@@ -586,6 +619,16 @@ int32_t ensure_py_deps() {
     }
     Py_DECREF(list_class);
     Py_DECREF(_list_symbol);
+
+    _tuple_symbol = PyBytes_FromFormat("%c", LIST_SYMBOL);
+    if (_tuple_symbol == NULL) {
+        return -1;
+    }
+    if (PyDict_SetItem(_type_to_symbol, tuple_class, _tuple_symbol)) {
+        return -1;
+    }
+    Py_DECREF(tuple_class);
+    Py_DECREF(_tuple_symbol);
 
     _bool_symbol = PyBytes_FromFormat("%c", BOOL_SYMBOL);
     if (_bool_symbol == NULL) {

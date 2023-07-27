@@ -213,7 +213,20 @@ static PyObject *foo_kv_function_dumps(PyObject *self, PyObject *const *args, Py
         return NULL;
     }
 
-    return dumps_as_pyobject(args[0]);
+    PyObject *res = dumps_as_pyobject(args[0]);
+
+    if (!res) {
+        if (_dispatch_errno == RES_BAD_TYPE) {
+            PyErr_SetString(PyExc_TypeError, "Did not recognize the argument type");
+        } else if (_dispatch_errno == RES_BAD_COLLECTION) {
+            PyErr_SetString(_embedded_collection_error, "Did not recognize the argument type");
+        } else {
+            PyErr_SetString(PyExc_ValueError, "There was a problem parsing the argument");
+        }
+        return NULL;
+    }
+
+    return res;
 
 }
 
@@ -228,7 +241,27 @@ static PyObject *foo_kv_function_dumps_hashable(PyObject *self, PyObject *const 
         return NULL;
     }
 
-    return _dumps_hashable_as_pyobject(args[0]);
+    PyObject *res = _dumps_hashable_as_pyobject(args[0]);
+
+    if (!res) {
+        switch (_dispatch_errno) {
+            case RES_BAD_TYPE:
+                PyErr_SetString(PyExc_TypeError, "Did not recognize the argument type");
+                break;
+            case RES_BAD_COLLECTION:
+                PyErr_SetString(_embedded_collection_error, "Did not recognize the argument type");
+                break;
+            case RES_BAD_HASH:
+                PyErr_SetString(_not_hashable_error, "Cannot hash the given type");
+                break;
+            default:
+                PyErr_SetString(PyExc_ValueError, "There was a problem parsing the argument");
+                break;
+        }
+        return NULL;
+    }
+
+    return res;
 
 }
 
@@ -243,7 +276,26 @@ static PyObject *foo_kv_function_loads(PyObject *self, PyObject *const *args, Py
         return NULL;
     }
 
-    return loads_from_pyobject(args[0]);
+    PyObject *res = loads_from_pyobject(args[0]);
+
+    if (!res) {
+        #if _FOO_KV_DEBUG == 1
+        char debug_buffer[256];
+        sprintf(debug_buffer, "foo_kv_function_loads: got dispatch_errno: %hd", _dispatch_errno);
+        log_error(debug_buffer);
+        #endif
+        if (_dispatch_errno == RES_BAD_TYPE) {
+            PyErr_SetString(PyExc_TypeError, "Did not recognize the argument type");
+        } else if (_dispatch_errno == RES_BAD_COLLECTION) {
+            PyErr_SetString(_embedded_collection_error, "Did not recognize the argument type");
+        } else {
+            PyErr_SetString(PyExc_ValueError, "There was a problem parsing the argument");
+        }
+        return NULL;
+    }
+
+    return res;
+
 
 }
 
@@ -258,7 +310,22 @@ static PyObject *foo_kv_function_loads_hashable(PyObject *self, PyObject *const 
         return NULL;
     }
 
-    return _loads_hashable_from_pyobject(args[0]);
+    PyObject *res = _loads_hashable_from_pyobject(args[0]);
+
+    if (!res) {
+        if (_dispatch_errno == RES_BAD_TYPE) {
+            PyErr_SetString(PyExc_TypeError, "Did not recognize the argument type");
+        } else if (_dispatch_errno == RES_BAD_COLLECTION) {
+            PyErr_SetString(_embedded_collection_error, "Did not recognize the argument type");
+        } else if (_dispatch_errno == RES_BAD_HASH) {
+            PyErr_SetString(_not_hashable_error, "Given type is unhashable");
+        } else {
+            PyErr_SetString(PyExc_ValueError, "There was a problem parsing the argument");
+        }
+        return NULL;
+    }
+
+    return res;
 
 }
 
@@ -416,7 +483,7 @@ static void *poll_loop(foo_kv_server *kv_self) {
 
         // poll for active fds
         poll_timeout = 1000;
-        #if _FOO_KV_POLL_DEBUG
+        #if _FOO_KV_POLL_DEBUG == 1
         sprintf(debug_buff, "poll_loop: about to call poll(timeout=%d)", poll_timeout);
         log_debug(debug_buff);
         #endif
@@ -678,10 +745,10 @@ static void *io_loop(foo_kv_server *kv_self) {
                 return NULL;
             }
             #if _FOO_KV_IO_DEBUG == 1
-            sprintf(debug_buff, "io_loop(): conn_fd: %d: connection io returned error", conn_fd);
+            sprintf(debug_buff, "io_loop(): conn_fd: %d: connection_io() returned error", conn_fd);
             log_error(debug_buff);
             #else
-            log_error("io_loop(): connection io returned error");
+            log_error("io_loop(): connection_io() returned error");
             #endif
         } // end connection_io() error check
 
@@ -790,6 +857,7 @@ PyMODINIT_FUNC PyInit_c(void) {
     PyModule_AddIntConstant(foo_kv_module, "RES_BAD_OP", RES_BAD_OP);
     PyModule_AddIntConstant(foo_kv_module, "RES_BAD_IX", RES_BAD_IX);
     PyModule_AddIntConstant(foo_kv_module, "RES_BAD_HASH", RES_BAD_HASH);
+    PyModule_AddIntConstant(foo_kv_module, "RES_BAD_COLLECTION", RES_BAD_COLLECTION);
 
     // add other constants
     PyModule_AddIntConstant(foo_kv_module, "MAX_MSG_SIZE", MAX_MSG_SIZE);

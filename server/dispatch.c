@@ -11,6 +11,8 @@
 #include "util.h"
 #include "dispatch.h"
 
+int16_t _dispatch_errno = 0;
+
 int32_t dispatch(foo_kv_server *server, int32_t connid, const uint8_t *buff, int32_t len, struct response_t *response) {
 
     #if _FOO_KV_DEBUG == 1
@@ -23,8 +25,8 @@ int32_t dispatch(foo_kv_server *server, int32_t connid, const uint8_t *buff, int
     }
     #endif
 
-    int32_t nstrs;
-    memcpy(&nstrs, buff, 4);
+    uint16_t nstrs;
+    memcpy(&nstrs, buff, sizeof(uint16_t));
 
     #if _FOO_KV_DEBUG == 1
     sprintf(debug_buffer, "dispatch(): nstrs=%d", nstrs);
@@ -32,8 +34,8 @@ int32_t dispatch(foo_kv_server *server, int32_t connid, const uint8_t *buff, int
     #endif
 
     const uint8_t *subcmds[nstrs];
-    int32_t subcmd_to_len[nstrs];
-    int32_t offset = 4;
+    uint16_t subcmd_to_len[nstrs];
+    uint16_t offset = sizeof(uint16_t);
     int32_t err = 0;
 
     for (int32_t ix = 0; ix < nstrs; ix++) {
@@ -44,8 +46,8 @@ int32_t dispatch(foo_kv_server *server, int32_t connid, const uint8_t *buff, int
             return 0;
         }
         // establish str len
-        int32_t slen;
-        memcpy(&slen, buff + offset, 4);
+        uint16_t slen;
+        memcpy(&slen, buff + offset, sizeof(uint16_t));
         if (slen < 0) {
             log_error("dispatch(): got request subcmd with negative len");
             response->status = RES_ERR_CLIENT;
@@ -59,7 +61,7 @@ int32_t dispatch(foo_kv_server *server, int32_t connid, const uint8_t *buff, int
         #endif
 
         // establish subcmd
-        offset += 4;
+        offset += sizeof(uint16_t);
         subcmds[ix] = buff + offset;
 
         offset += slen;
@@ -126,11 +128,52 @@ int32_t dispatch(foo_kv_server *server, int32_t connid, const uint8_t *buff, int
         response->status = RES_UNKNOWN;
     }
 
+    if (PyErr_Occurred()) {
+        log_warning("dispatch(): a handler raised a Python exception that was not cleared");
+        PyErr_Clear();
+    }
+
+    _dispatch_errno = 0;
+
     return err;
 
 }
 
-int32_t do_get(foo_kv_server *server, const uint8_t **args, const int32_t *arg_to_len, int32_t nargs, struct response_t *response) {
+void error_handler(struct response_t *response) {
+    PyObject *py_err = PyErr_Occurred();
+    if (py_err) {
+        PyErr_Clear();
+    }
+    #if _FOO_KV_DEBUG == 1
+    char debug_buffer[256];
+    sprintf(debug_buffer, "error_handler: got dispatch_errno: %hd", _dispatch_errno);
+    log_error(debug_buffer);
+    #endif
+    switch (_dispatch_errno) {
+        case RES_BAD_HASH:
+            log_error("error_handler(): Failed to loads(key): not hashable");
+            response->status = RES_BAD_HASH;
+            break;
+        case RES_BAD_TYPE:
+            log_error("error_handler(): Failed to loads(key): bad type");
+            response->status = RES_BAD_TYPE;
+            break;
+        case RES_BAD_COLLECTION:
+            log_error("error_handler(): Failed to loads(key): embedded collection");
+            response->status = RES_BAD_COLLECTION;
+            break;
+        default:
+            #if _FOO_KV_DEBUG == 1
+            sprintf(debug_buffer, "error_handler(): Failed to loads(key): unexpected py error type: %hd", _dispatch_errno);
+            log_error(debug_buffer);
+            #else
+            log_error("error_handler(): Failed to loads(key): unexpected py error type");
+            #endif
+            response->status = RES_UNKNOWN;
+    }
+}
+
+int32_t do_get(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response) {
 
     #if _FOO_KV_DEBUG == 1
     log_debug("do_get(): got request");
@@ -141,24 +184,9 @@ int32_t do_get(foo_kv_server *server, const uint8_t **args, const int32_t *arg_t
         return 0;
     }
 
-    PyObject *py_key = PyBytes_FromStringAndSize((char *)args[0], arg_to_len[0]);
-    if (!py_key) {
-        log_error("do_put(): failed to cast key as py object");
-        response->status = RES_BAD_TYPE;
-        return 0;
-    }
-
-    PyObject *loaded_key = _loads_hashable_from_pyobject(py_key);
-    Py_DECREF(py_key);
+    PyObject *loaded_key = _loads_hashable((char *)args[0], arg_to_len[0]);
     if (!loaded_key) {
-        PyObject *py_err = PyErr_Occurred();
-        if (py_err && PyErr_ExceptionMatches(_not_hashable_error)) {
-            log_error("do_get(): Failed to loads(key): not hashable");
-            response->status = RES_BAD_HASH;
-        } else {
-            log_error("do_get(): Failed to loads(key): bad type");
-            response->status = RES_BAD_TYPE;
-        }
+        error_handler(response);
         return 0;
     }
 
@@ -170,22 +198,25 @@ int32_t do_get(foo_kv_server *server, const uint8_t **args, const int32_t *arg_t
         #if _FOO_KV_DEBUG == 1
         log_debug("do_get(): Failed to lookup key in storage, perhaps this is expected.");
         #endif
+        PyErr_Clear();
         response->status = RES_BAD_KEY;
         return 0;
     }
 
     PyObject *py_res = dumps_as_pyobject(py_val);
+    if (!py_res) {
+        error_handler(response);
+        return 0;
+    }
 
     response->status = RES_OK;
-    response->data = (uint8_t *)PyBytes_AsString(py_res);
-    response->datalen = PyObject_Length(py_res);
-    Py_DECREF(py_res);
+    response->payload = py_res;
 
     return 0;
 
 }
 
-int32_t do_put(foo_kv_server *server, const uint8_t **args, const int32_t *arg_to_len, int32_t nargs, struct response_t *response) {
+int32_t do_put(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response) {
 
     #if _FOO_KV_DEBUG == 1
     log_debug("do_put(): got request");
@@ -196,39 +227,15 @@ int32_t do_put(foo_kv_server *server, const uint8_t **args, const int32_t *arg_t
         return 0;
     }
 
-    PyObject *py_key = PyBytes_FromStringAndSize((char *)args[0], arg_to_len[0]);
-    if (!py_key) {
-        log_error("do_put(): failed to cast key as py object");
-        response->status = RES_BAD_TYPE;
-        return 0;
-    }
-
-    PyObject *loaded_key = _loads_hashable_from_pyobject(py_key);
-    Py_DECREF(py_key);
+    PyObject *loaded_key = _loads_hashable((char *)args[0], arg_to_len[0]);
     if (!loaded_key) {
-        PyObject *py_err = PyErr_Occurred();
-        if (py_err && PyErr_ExceptionMatches(_not_hashable_error)) {
-            log_error("do_put(): Failed to loads(key): not hashable");
-            response->status = RES_BAD_HASH;
-        } else {
-            log_error("do_put(): Failed to loads(key): bad type");
-            response->status = RES_BAD_TYPE;
-        }
+        error_handler(response);
         return 0;
     }
 
-    PyObject *py_val = PyBytes_FromStringAndSize((char *)args[1], arg_to_len[1]);
-    if (!py_val) {
-        log_error("do_put(): failed to cast val as py object");
-        response->status = RES_BAD_TYPE;
-        return 0;
-    }
-
-    PyObject *loaded_val = loads_from_pyobject(py_val);
-    Py_DECREF(py_val);
+    PyObject *loaded_val = loads((char *)args[1], arg_to_len[1]);
     if (!loaded_val) {
-        log_error("do_put(): failed to loads(val)");
-        response->status = RES_BAD_TYPE;
+        error_handler(response);
         return 0;
     }
 
@@ -260,7 +267,7 @@ int32_t do_put(foo_kv_server *server, const uint8_t **args, const int32_t *arg_t
 
 }
 
-int32_t do_del(foo_kv_server *server, const uint8_t **args, const int32_t *arg_to_len, int32_t nargs, struct response_t *response) {
+int32_t do_del(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response) {
 
     #if _FOO_KV_DEBUG == 1
     log_debug("do_del(): got request");
@@ -273,24 +280,9 @@ int32_t do_del(foo_kv_server *server, const uint8_t **args, const int32_t *arg_t
 
     int32_t res;
 
-    PyObject *py_key = PyBytes_FromStringAndSize((char *)args[0], arg_to_len[0]);
-    if (!py_key) {
-        log_error("do_put(): failed to cast key as py object");
-        response->status = RES_BAD_TYPE;
-        return 0;
-    }
-
-    PyObject *loaded_key = _loads_hashable_from_pyobject(py_key);
-    Py_DECREF(py_key);
+    PyObject *loaded_key = _loads_hashable((char *)args[0], arg_to_len[0]);
     if (!loaded_key) {
-        PyObject *py_err = PyErr_Occurred();
-        if (py_err && PyErr_ExceptionMatches(_not_hashable_error)) {
-            log_error("do_get(): Failed to loads(key): not hashable");
-            response->status = RES_BAD_HASH;
-        } else {
-            log_error("do_get(): Failed to loads(key): bad type");
-            response->status = RES_BAD_TYPE;
-        }
+        error_handler(response);
         return 0;
     }
 
@@ -338,8 +330,11 @@ int32_t do_del(foo_kv_server *server, const uint8_t **args, const int32_t *arg_t
     */
 
     // PyDict_DelItem segfaults randomly
+    /*
     res = _pyobject_safe_delitem(server->storage, loaded_key);
     Py_DECREF(loaded_key);
+    */
+    res = PyDict_DelItem(server->storage, loaded_key);
 
     #if _FOO_KV_DEBUG == 1
     log_debug("do_del(): got res");
@@ -355,17 +350,22 @@ int32_t do_del(foo_kv_server *server, const uint8_t **args, const int32_t *arg_t
     log_debug("do_del(): got past release lock");
     #endif
 
+    /*
     if (res < 0) {
         log_error("do_del(): py operation resulted in error");
         PyErr_Clear();
         response->status = RES_ERR_SERVER;
         return -1;
     }
+    */
 
-    if (res == 0) {
+    if (res < 0) {
         #if _FOO_KV_DEBUG == 1
         log_debug("do_del(): key was not in storage: perhaps this is expected");
         #endif
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+        }
         response->status = RES_BAD_KEY;
         return 0;
     }
@@ -383,11 +383,15 @@ int32_t do_del(foo_kv_server *server, const uint8_t **args, const int32_t *arg_t
 // helper methods
 PyObject *dumps_as_pyobject(PyObject *x) {
 
+    Py_INCREF(_type_f);
     PyObject *x_type = PyObject_CallOneArg(_type_f, x);
+    Py_DECREF(_type_f);
     if (!x_type) {
         return NULL;
     }
+    Py_INCREF(_type_to_symbol);
     PyObject *symbol = PyDict_GetItem(_type_to_symbol, x_type);
+    Py_DECREF(_type_to_symbol);
     Py_DECREF(x_type);
     if (!symbol) {
         return NULL;
@@ -403,7 +407,7 @@ PyObject *dumps_as_pyobject(PyObject *x) {
         case STRING_SYMBOL:
             return _dumps_unicode(x);
         case BYTES_SYMBOL:
-            return PyBytes_FromFormat("%c%s", s, PyBytes_AS_STRING(x));
+            return PyBytes_FromFormat("%c%s", BYTES_SYMBOL, PyBytes_AS_STRING(x));
         case LIST_SYMBOL:
             return _dumps_list(x);
         case BOOL_SYMBOL:
@@ -415,7 +419,7 @@ PyObject *dumps_as_pyobject(PyObject *x) {
             }
             return NULL;
         default:
-            PyErr_SetString(PyExc_TypeError, "unsupported type passed to dumps");
+            _dispatch_errno = RES_BAD_TYPE;
             return NULL;
     }
 
@@ -436,6 +440,7 @@ const char *dumps(PyObject *x) {
 PyObject *_dumps_long(PyObject *x) {
     long l = PyLong_AsLong(x);
     if (PyErr_Occurred()) {
+        PyErr_Clear();
         return NULL;
     }
     return PyBytes_FromFormat("%c%ld", INT_SYMBOL, l);
@@ -467,33 +472,67 @@ PyObject *_dumps_unicode(PyObject *x) {
 }
 
 PyObject *_dumps_list(PyObject *x) {
-    Py_ssize_t size = PyList_GET_SIZE(x);
+    uint16_t size = PyList_GET_SIZE(x);
+    char symbol = LIST_SYMBOL;
     PyObject *intermediate = PyList_New(size);
+    if (!intermediate) {
+        return NULL;
+    }
+    #if _FOO_KV_DEBUG == 1
+    char debug_buff[256];
+    #endif
+    // char for type declaration, int16 for the number of items
+    int32_t buffer_len = sizeof(char) + sizeof(uint16_t);
     for (Py_ssize_t ix = 0; ix < size; ix++) {
         PyObject *dumped_item = _dumps_collectable_as_pyobject(PyList_GET_ITEM(x, ix));
         if (!dumped_item) {
+            Py_DECREF(intermediate);
             return NULL;
         }
-        PyObject *item_str = PyObject_CallMethodOneArg(dumped_item, _decode_str, _utf8_str);
-        Py_DECREF(dumped_item);
-        if (!item_str) {
-            return NULL;
-        }
-        PyList_SET_ITEM(intermediate, ix, item_str);
+        PyList_SET_ITEM(intermediate, ix, dumped_item);
+        buffer_len += sizeof(uint16_t) + PyBytes_GET_SIZE(dumped_item);
     }
-    PyObject *dump_args = PyTuple_New(1);
-    // this steals a reference to intermediate
-    PyTuple_SET_ITEM(dump_args, 0, intermediate);
-    PyObject *dumped = PyObject_Call(_json_dumps_f, dump_args, _json_kwargs);
-    Py_DECREF(dump_args);
-    if (!dumped) {
+    char buffer[buffer_len];
+    int32_t offset = 0;
+    memcpy(buffer + offset, &symbol, sizeof(char));
+    offset += sizeof(char);
+    memcpy(buffer + offset, &size, sizeof(uint16_t));
+    offset += sizeof(uint16_t);
+    for (Py_ssize_t ix = 0; ix < size; ix++) {
+        #if _FOO_KV_DEBUG == 1
+        sprintf(debug_buff, "_dumps_list(): offset: %d", offset);
+        log_debug(debug_buff);
+        #endif
+        PyObject *item = PyList_GET_ITEM(intermediate, ix);
+        uint16_t slen = PyBytes_GET_SIZE(item);
+        #if _FOO_KV_DEBUG == 1
+        sprintf(debug_buff, "_dumps_list(): len(items[%ld])=%hu", ix, slen);
+        log_debug(debug_buff);
+        sprintf(debug_buff, "_dumps_list(): items[%ld]=%.*s", ix, slen, PyBytes_AS_STRING(item));
+        log_debug(debug_buff);
+        #endif
+        memcpy(buffer + offset, &slen, sizeof(uint16_t));
+        offset += sizeof(uint16_t);
+        memcpy(buffer + offset, PyBytes_AS_STRING(item), slen);
+        offset += slen;
+    }
+
+    if (offset != buffer_len) {
+        #if _FOO_KV_DEBUG == 1
+        if (offset > buffer_len) {
+            log_error("_dumps_list(): offset overshot expected buffer_len");
+        } else {
+            log_error("_dumps_list(): offset undershot expected buffer_len");
+        }
+        #endif
+        _dispatch_errno = RES_ERR_SERVER;
         return NULL;
     }
-    PyObject *dumped_bytes = PyUnicode_AsASCIIString(dumped);
-    Py_DECREF(dumped);
-    PyObject *res = PyBytes_FromFormat("%c%s", LIST_SYMBOL, PyBytes_AS_STRING(dumped_bytes));
-    Py_DECREF(dumped_bytes);
-    return res;
+
+    Py_DECREF(intermediate);
+
+    return PyBytes_FromStringAndSize(buffer, buffer_len);
+
 }
 
 
@@ -522,10 +561,10 @@ PyObject *_dumps_hashable_as_pyobject(PyObject *x) {
             return PyBytes_FromFormat("%c%s", BYTES_SYMBOL, PyBytes_AS_STRING(x));
         case LIST_SYMBOL:
         case BOOL_SYMBOL:
-            PyErr_SetString(_not_hashable_error, "Cannot use the given type as a key");
+            _dispatch_errno = RES_BAD_HASH;
             return NULL;
         default:
-            PyErr_SetString(PyExc_TypeError, "unsupported type passed to dumps");
+            _dispatch_errno = RES_BAD_TYPE;
             return NULL;
     }
 
@@ -558,7 +597,7 @@ PyObject *_dumps_collectable_as_pyobject(PyObject *x) {
         case BYTES_SYMBOL:
             return PyBytes_FromFormat("%c%s", s, PyBytes_AS_STRING(x));
         case LIST_SYMBOL:
-            PyErr_SetString(_embedded_collection_error, "Cannot embed a collection type inside another collection");
+            _dispatch_errno = RES_BAD_COLLECTION;
             return NULL;
         case BOOL_SYMBOL:
             if (Py_IsTrue(x)) {
@@ -569,7 +608,7 @@ PyObject *_dumps_collectable_as_pyobject(PyObject *x) {
             }
             return NULL;
         default:
-            PyErr_SetString(PyExc_TypeError, "unsupported type passed to dumps");
+            _dispatch_errno = RES_BAD_TYPE;
             return NULL;
     }
 
@@ -585,38 +624,33 @@ PyObject *loads_from_pyobject(PyObject *x) {
         return NULL;
     }
 
-    if (!PyObject_Length(x)) {
-        PyErr_SetString(PyExc_TypeError, "cannot load zero length bytes");
+    int32_t len = PyObject_Length(x);
+    if (!len) {
+        _dispatch_errno = RES_BAD_TYPE;
         return NULL;
     }
 
-    return loads(res);
+    return loads(res, len);
 
 }
 
-PyObject *loads(const char *x) {
+PyObject *loads(const char *x, int32_t len) {
 
     switch (x[0]) {
         case INT_SYMBOL:
-            return PyLong_FromString(x + 1, NULL, 0);
+            return _loads_long(x + 1, len - 1);
         case FLOAT_SYMBOL:
-            return _loads_float(x + 1);
+            return _loads_float(x + 1, len - 1);
         case STRING_SYMBOL:
-            return _loads_unicode(x + 1);
+            return _loads_unicode(x + 1, len - 1);
         case BYTES_SYMBOL:
-            return PyBytes_FromString(x + 1);
+            return PyBytes_FromStringAndSize(x + 1, len - 1);
         case LIST_SYMBOL:
-            return _loads_list(x + 1);
+            return _loads_list(x + 1, len - 1);
         case BOOL_SYMBOL:
-            if (x[1] == '0') {
-                Py_RETURN_FALSE;
-            }
-            if (x[1] == '1') {
-                Py_RETURN_TRUE;
-            }
-            return NULL;
+            return _loads_bool(x + 1, len - 1);
         default:
-            PyErr_SetString(PyExc_ValueError, "Tried to load object with unrecognized type.");
+            _dispatch_errno = RES_BAD_TYPE;
             return NULL;
     }
 
@@ -624,8 +658,19 @@ PyObject *loads(const char *x) {
 
 }
 
-PyObject *_loads_float(const char *x) {
-    PyObject *intermediate = PyUnicode_FromString(x);
+PyObject *_loads_long(const char *x, int32_t len) {
+
+    PyObject *xs = PyUnicode_FromStringAndSize(x, len);
+    if (!xs) {
+        return NULL;
+    }
+
+    return PyLong_FromUnicodeObject(xs, 0);
+
+}
+
+PyObject *_loads_float(const char *x, int32_t len) {
+    PyObject *intermediate = PyUnicode_FromStringAndSize(x, len);
     if (!intermediate) {
         return NULL;
     }
@@ -637,16 +682,122 @@ PyObject *_loads_float(const char *x) {
     return res;
 }
 
-PyObject *_loads_unicode(const char *x) {
-    Py_ssize_t size = strlen(x);
-    return PyUnicode_DecodeUTF8(x, size, "strict");
+PyObject *_loads_unicode(const char *x, int32_t len) {
+    return PyUnicode_DecodeUTF8(x, len, "strict");
+
 }
 
-PyObject *_loads_list(const char *x) {
-    PyObject *xs = PyUnicode_FromString(x);
+PyObject *_loads_bool(const char *x, int32_t len) {
+
+    if (len != 1) {
+        _dispatch_errno = RES_BAD_TYPE;
+        return NULL;
+    }
+    if (x[0] == '0') {
+        Py_RETURN_FALSE;
+    }
+    if (x[0] == '1') {
+        Py_RETURN_TRUE;
+    }
+
+    _dispatch_errno = RES_BAD_TYPE;
+    return NULL;
+
+}
+
+PyObject *_loads_list(const char *x, int32_t len) {
+
+    if ((uint16_t)len < sizeof(uint16_t)) {
+        _dispatch_errno = RES_BAD_TYPE;
+        return NULL;
+    }
+
+    uint16_t nstrs;
+    memcpy(&nstrs, x, sizeof(uint16_t));
+
+    #if _FOO_KV_DEBUG == 1
+    char debug_buffer[256];
+    sprintf(debug_buffer, "_loads_list(): nstrs=%hu, len=%d", nstrs, len);
+    log_debug(debug_buffer);
+    #endif
+
+    const char *items[nstrs];
+    uint16_t item_to_len[nstrs];
+    uint16_t offset = sizeof(uint16_t);
+
+    for (int32_t ix = 0; ix < nstrs; ix++) {
+        #if _FOO_KV_DEBUG == 1
+        sprintf(debug_buffer, "_loads_list(): offset=%hu", offset);
+        log_debug(debug_buffer);
+        #endif
+        // sanity
+        if (offset >= len) {
+            log_error("_loads_list(): got misformed request.");
+            _dispatch_errno = RES_ERR_CLIENT;
+            return NULL;
+        }
+        // establish str len
+        uint16_t slen;
+        memcpy(&slen, x + offset, sizeof(uint16_t));
+        if (slen < 0) {
+            log_error("_loads_list(): got request item with negative len");
+            _dispatch_errno = RES_ERR_CLIENT;
+            return NULL;
+        }
+        item_to_len[ix] = slen;
+
+        #if _FOO_KV_DEBUG == 1
+        sprintf(debug_buffer, "_loads_list(): item_to_len[%d]=%d", (int)ix, slen);
+        log_debug(debug_buffer);
+        #endif
+
+        // establish subcmd
+        offset += sizeof(uint16_t);
+        items[ix] = x + offset;
+
+        offset += slen;
+
+        #if _FOO_KV_DEBUG == 1
+        if (slen < 200) {
+            sprintf(debug_buffer, "_loads_list(): items[%d]=%.*s", (int)ix, slen, items[ix]);
+            log_debug(debug_buffer);
+        } else {
+            log_debug("_loads_list(): subcmd too long for log");
+        }
+        #endif
+
+    }
+
+    if (offset != len) {
+        if (offset > len) {
+            log_error("dispatch(): got malformed request: offset overshot len");
+        } else {
+            log_error("dispatch(): got malformed request: offset undershot len");
+        }
+        _dispatch_errno = RES_ERR_CLIENT;
+        return NULL;
+    }
+
+    PyObject *result = PyList_New(nstrs);
+    for (Py_ssize_t ix = 0; ix < nstrs; ix++) {
+        PyObject *loaded_item = _loads_collectable(items[ix], item_to_len[ix]);
+        if (!loaded_item) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        PyList_SET_ITEM(result, ix, loaded_item);
+    }
+    return result;
+
+    /*
+    PyObject *xs = PyUnicode_FromStringAndSize(x, len);
     PyObject *intermediate = PyObject_CallOneArg(_json_loads_f, xs);
     Py_DECREF(xs);
     if (!intermediate) {
+        return NULL;
+    }
+    if (!PyList_Check(intermediate)) {
+        _dispatch_errno = RES_BAD_TYPE;
         return NULL;
     }
     Py_ssize_t size = PyList_GET_SIZE(intermediate);
@@ -665,6 +816,8 @@ PyObject *_loads_list(const char *x) {
     }
     Py_DECREF(intermediate);
     return res;
+    */
+
 }
 
 
@@ -675,33 +828,34 @@ PyObject *_loads_from_pyobject(PyObject *x) {
         return NULL;
     }
 
-    if (!PyObject_Length(x)) {
-        PyErr_SetString(PyExc_TypeError, "cannot load zero length bytes");
+    int32_t len = PyObject_Length(x);
+    if (!len) {
+        _dispatch_errno = RES_BAD_TYPE;
         return NULL;
     }
 
-    return loads(res);
+    return loads(res, len);
 
 }
 
 
-PyObject *_loads_hashable(const char *x) {
+PyObject *_loads_hashable(const char *x, int32_t len) {
 
     switch (x[0]) {
         case INT_SYMBOL:
-            return PyLong_FromString(x + 1, NULL, 0);
+            return _loads_long(x + 1, len - 1);
         case FLOAT_SYMBOL:
-            return _loads_float(x + 1);
+            return _loads_float(x + 1, len - 1);
         case STRING_SYMBOL:
-            return _loads_unicode(x + 1);
+            return _loads_unicode(x + 1, len - 1);
         case BYTES_SYMBOL:
-            return PyBytes_FromString(x + 1);
+            return PyBytes_FromStringAndSize(x + 1, len - 1);
         case LIST_SYMBOL:
         case BOOL_SYMBOL:
-            PyErr_SetString(_not_hashable_error, "Cannot use the given type as a key");
+            _dispatch_errno = RES_BAD_HASH;
             return NULL;
         default:
-            PyErr_SetString(PyExc_ValueError, "Tried to load object with unrecognized type.");
+            _dispatch_errno = RES_BAD_TYPE;
             return NULL;
     }
 
@@ -717,40 +871,35 @@ PyObject *_loads_hashable_from_pyobject(PyObject *x) {
         return NULL;
     }
 
-    if (!PyObject_Length(x)) {
-        PyErr_SetString(PyExc_TypeError, "cannot load zero length bytes");
+    int32_t len = PyObject_Length(x);
+    if (!len) {
+        _dispatch_errno = RES_BAD_TYPE;
         return NULL;
     }
 
-    return _loads_hashable(res);
+    return _loads_hashable(res, len);
 
 }
 
 
-PyObject *_loads_collectable(const char *x) {
+PyObject *_loads_collectable(const char *x, int32_t len) {
 
     switch (x[0]) {
         case INT_SYMBOL:
-            return PyLong_FromString(x + 1, NULL, 0);
+            return _loads_long(x + 1, len - 1);
         case FLOAT_SYMBOL:
-            return _loads_float(x + 1);
+            return _loads_float(x + 1, len - 1);
         case STRING_SYMBOL:
-            return _loads_unicode(x + 1);
+            return _loads_unicode(x + 1, len - 1);
         case BYTES_SYMBOL:
-            return PyBytes_FromString(x + 1);
+            return PyBytes_FromStringAndSize(x + 1, len - 1);
         case LIST_SYMBOL:
-            PyErr_SetString(_embedded_collection_error, "Cannot embed a collection type inside another collection");
+            _dispatch_errno = RES_BAD_COLLECTION;
             return NULL;
         case BOOL_SYMBOL:
-            if (x[1] == '0') {
-                Py_RETURN_FALSE;
-            }
-            if (x[1] == '1') {
-                Py_RETURN_TRUE;
-            }
-            return NULL;
+            return _loads_bool(x + 1, len - 1);
         default:
-            PyErr_SetString(PyExc_ValueError, "Tried to load object with unrecognized type.");
+            _dispatch_errno = RES_BAD_TYPE;
             return NULL;
     }
 
@@ -766,11 +915,12 @@ PyObject *_loads_collectable_from_pyobject(PyObject *x) {
         return NULL;
     }
 
-    if (!PyObject_Length(x)) {
-        PyErr_SetString(PyExc_TypeError, "cannot load zero length bytes");
+    int32_t len = PyObject_Length(x);
+    if (!len) {
+        _dispatch_errno = RES_BAD_COLLECTION;
         return NULL;
     }
 
-    return _loads_collectable(res);
+    return _loads_collectable(res, len);
 
 }

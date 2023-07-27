@@ -191,12 +191,20 @@ int32_t connection_io(foo_kv_server *server, struct conn_t *conn) {
     while (1) {
         switch (conn->state) {
             case STATE_REQ:
+                #if _FOO_KV_DEBUG == 1
+                sprintf(debug_buffer, "connection_io(): conn_fd: %d: entered STATE_REQ", conn->fd);
+                log_debug(debug_buffer);
+                #endif
                 err = state_req(conn);
                 if (err) {
                     goto CONNECTION_IO_END;
                 }
                 continue;
             case STATE_RES:
+                #if _FOO_KV_DEBUG == 1
+                sprintf(debug_buffer, "connection_io(): conn_fd: %d: entered STATE_RES", conn->fd);
+                log_debug(debug_buffer);
+                #endif
                 err = state_res(conn);
                 if (err) {
                     goto CONNECTION_IO_END;
@@ -284,6 +292,7 @@ int32_t state_req(struct conn_t *conn) {
     int32_t res;
 
     do {
+
         while ((res = try_fill_buffer(conn)) > 0) {}
         if (res < 0) {
             return res;
@@ -292,6 +301,15 @@ int32_t state_req(struct conn_t *conn) {
         if (res < 0) {
             return res;
         }
+
+        #if _FOO_KV_DEBUG == 1
+        if (conn->state != STATE_REQ) {
+            char debug_buffer[256];
+            sprintf(debug_buffer, "state_req(): end of loop: state: %d: will continue if state is: %d", conn->state, STATE_REQ);
+            log_debug(debug_buffer);
+        }
+        #endif
+
     } while (conn->state == STATE_REQ);
 
     return 0;
@@ -327,6 +345,7 @@ int32_t try_fill_buffer(struct conn_t *conn) {
     } while (rv < 0 && errno == EINTR);
 
     if (rv < 0) {
+        conn->err = errno;
         if (errno != EAGAIN) {
             log_error("try_fill_buffer(): read() error: unknown");
             conn->state = STATE_END;
@@ -338,37 +357,40 @@ int32_t try_fill_buffer(struct conn_t *conn) {
         //  1. try_one_request finds enough data to process a request, and will set the state to STATE_RES
         //  2. try_one_request will not find enough data, and we will move along to another connection
         #if _FOO_KV_DEBUG == 1
-        log_debug("try_fill_buffer(): no incoming data: checking if there is unread data in buffer");
+        log_debug("try_fill_buffer(): got EAGAIN: continuing to try_one_request");
         #endif
-        if (conn->rbuff_read < conn->rbuff_size) {
-            #if _FOO_KV_DEBUG == 1
-            log_debug("try_fill_buffer(): data in buffer: continuing to try_one_request");
-            #endif
-            // need to not change state if we get here
-        } else {
-            #if _FOO_KV_DEBUG == 1
-            log_debug("try_fill_buffer(): no data in buffer");
-            #endif
-            conn->state = STATE_REQ_WAITING;
-        }
         return 0;
     }
+
+    conn->err = 0;
 
     if (rv == 0) {
         if (conn->rbuff_size > 0) {
             log_error("try_fill_buffer(): unexpected EOF");
         }
+        conn->state = STATE_END;
         return -1;
     }
 
+    #if _FOO_KV_DEBUG == 1
+    char debug_buffer[256];
+    if (conn->state != STATE_REQ) {
+        sprintf(debug_buffer, "try_fill_buffer(): state is reverting from %d to %d", conn->state, STATE_REQ);
+        log_debug(debug_buffer);
+    }
+    sprintf(debug_buffer, "try_fill_buffer(): bytes read: %ld", rv);
+    log_debug(debug_buffer);
+    #endif
+    conn->state = STATE_REQ;
     conn->rbuff_size += (size_t)rv;
 
     if (conn->rbuff_size > conn->rbuff_max) {
         log_error("try_fill_buffer(): assertion 2: conn->rbuff_size is out of sync with conn->rbuff_max");
+        conn->state = STATE_END;
         return -1;
     }
 
-    return 1;
+    return rv;
 
 }
 
@@ -377,19 +399,22 @@ int32_t try_one_request(struct conn_t *conn) {
 
     // check if we have 4 bytes in rbuff
     // if not, we will try again next iteration
-    if (conn->rbuff_size - conn->rbuff_read < 4) {
+    if (conn->rbuff_size - conn->rbuff_read < sizeof(uint16_t)) {
         if (conn->rbuff_max - conn->rbuff_read < 1024) {
             if (conn_rbuff_flush(conn) < 0) {
                 conn->state = STATE_END;
                 return -1;
             }
         }
+        if (conn->err) {
+            conn->state = STATE_REQ_WAITING;
+        }
         return 0;
     }
 
-    uint32_t len;
-    memcpy(&len, conn->rbuff + conn->rbuff_read, 4);
-    uint32_t msglen = len + 4;
+    uint16_t len;
+    memcpy(&len, conn->rbuff + conn->rbuff_read, sizeof(uint16_t));
+    uint32_t msglen = len + sizeof(uint16_t);
 
     if (conn->rbuff_max - conn->rbuff_read < msglen) {
         if (msglen > MAX_MSG_SIZE) {
@@ -412,6 +437,19 @@ int32_t try_one_request(struct conn_t *conn) {
 
     if (conn->rbuff_size - conn->rbuff_read < msglen) {
         // not enough data, will try again next iteration.
+        #if _FOO_KV_DEBUG == 1
+        char debug_buff[256];
+        sprintf(debug_buff, "try_one_request(): got msglen: %hu, currently read: %ld, currently unread: %ld",
+                msglen, conn->rbuff_read, conn->rbuff_size - conn->rbuff_read);
+        log_debug(debug_buff);
+        #endif
+        if (conn->err) {
+            // unless an err is set, in which case we break
+            #if _FOO_KV_DEBUG == 1
+            log_debug("try_one_request(): previous read resulted in EAGAIN: will exit loop");
+            #endif
+            conn->state = STATE_REQ_WAITING;
+        }
         return 0;
     }
 
@@ -427,11 +465,11 @@ int32_t state_dispatch(foo_kv_server *server, struct conn_t *conn) {
     log_debug("state_dispatch(): beginning");
     #endif
 
-    uint32_t len;
+    uint16_t len;
     int32_t err;
     uint8_t *rbuff_start = conn->rbuff + conn->rbuff_read;
-    memcpy(&len, rbuff_start, 4);
-    rbuff_start += 4;
+    memcpy(&len, rbuff_start, sizeof(uint16_t));
+    rbuff_start += sizeof(uint16_t);
 
     struct response_t *response = PyMem_RawCalloc(1, sizeof(struct response_t));
     if (!response) {
@@ -444,7 +482,7 @@ int32_t state_dispatch(foo_kv_server *server, struct conn_t *conn) {
     PyMem_RawFree(response);
 
     // 4 for the len indicator + rest of message
-    conn->rbuff_read += 4 + len;
+    conn->rbuff_read += sizeof(uint16_t) + len;
 
     // change state
     conn->state = STATE_RES;
