@@ -11,6 +11,7 @@ def test_bad_load_type():
     with pytest.raises(TypeError):
         loads(x)
 
+
 def test_int():
     x = 511
     dumped_x = dumps(x)
