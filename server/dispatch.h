@@ -12,6 +12,9 @@
 #define CMD_GET 118508615
 #define CMD_PUT 612676312
 #define CMD_DEL 1534775668
+#define CMD_QUEUE -52164368
+#define CMD_PUSH 1069254648
+#define CMD_POP 638676238
 
 
 extern int16_t _dispatch_errno;
@@ -22,6 +25,9 @@ void error_handler(struct response_t *response);
 int32_t do_get(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response);
 int32_t do_set(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response);
 int32_t do_del(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response);
+int32_t do_queue(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response);
+int32_t do_push(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response);
+int32_t do_pop(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response);
 
 // helper methods
 PyObject *dumps_as_pyobject(PyObject *x);

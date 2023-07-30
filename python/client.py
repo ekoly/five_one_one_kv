@@ -131,6 +131,25 @@ def _unpack_from(res: bytes, offset=0) -> Tuple[int, bytes, int]:
     return status, data, offset
 
 
+def _convert_ttl(ttl: Any) -> bytes:
+    dt_ttl = None
+    if isinstance(ttl, int):
+        dt_ttl = datetime.now(tz=timezone.utc)
+        dt_ttl += timedelta(seconds=ttl)
+    elif isinstance(ttl, timedelta):
+        dt_ttl = datetime.now(tz=timezone.utc)
+        dt_ttl += ttl
+    elif isinstance(ttl, datetime):
+        if ttl.tzinfo is None:
+            dt_ttl = ttl.astimezone()
+        else:
+            dt_ttl = ttl
+    else:
+        raise TypeError("ttl argument must be datetime, timedelta, or int if given")
+    ttl = dumps(dt_ttl)
+    return ttl
+
+
 _code_to_exc = collections.defaultdict(
     lambda: Exception("Encountered unrecognized status")
 )
@@ -148,7 +167,7 @@ _code_to_exc[RES_BAD_OP] = AttributeError(
 )
 _code_to_exc[RES_BAD_IX] = IndexError("")
 _code_to_exc[RES_BAD_HASH] = TypeError("Tried to send an unhashable type as a key")
-_code_to_exc[RES_BAD_COLLECTION] = TypeError(
+_code_to_exc[RES_BAD_COLLECTION] = EmbeddedCollectionError(
     "Cannot embed a collection in another collection."
 )
 
@@ -213,29 +232,31 @@ class Client:
         key = dumps_hashable(key)
         val = dumps(val)
         if ttl is not None:
-            dt_ttl = None
-            if isinstance(ttl, int):
-                dt_ttl = datetime.now(tz=timezone.utc)
-                dt_ttl += timedelta(seconds=ttl)
-            elif isinstance(ttl, timedelta):
-                dt_ttl = datetime.now(tz=timezone.utc)
-                dt_ttl += ttl
-            elif isinstance(ttl, datetime):
-                if ttl.tzinfo is None:
-                    dt_ttl = ttl.astimezone()
-                else:
-                    dt_ttl = ttl
-            else:
-                raise TypeError(
-                    "ttl argument must be datetime, timedelta, or int if given"
-                )
-            ttl = dumps(dt_ttl)
+            ttl = _convert_ttl(ttl)
             return self._submit(key, _pack(b"put", key, val, ttl))
         return self._submit(key, _pack(b"put", key, val))
 
     def __delitem__(self, key: Any) -> None:
         key = dumps_hashable(key)
         self._submit(key, _pack(b"del", key))
+
+    def queue(
+        self, key: Any, ttl: Union[datetime, timedelta, int, None] = None
+    ) -> None:
+        key = dumps_hashable(key)
+        if ttl is not None:
+            ttl = _convert_ttl(ttl)
+            return self._submit(key, _pack(b"queue", key, ttl))
+        return self._submit(key, _pack(b"queue", key))
+
+    def push(self, key: Any, val: Any) -> None:
+        key = dumps_hashable(key)
+        val = dumps(val)
+        return self._submit(key, _pack(b"push", key, val))
+
+    def pop(self, key: Any) -> Any:
+        key = dumps_hashable(key)
+        return self._submit(key, _pack(b"pop", key))
 
     def _looped_recv(self):
         response = b""

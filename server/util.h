@@ -34,7 +34,9 @@ extern PyObject *_debug_str;
 extern PyObject *_collections_module;
 extern PyObject *_deq_class;
 extern PyObject *_pop_str;
+extern PyObject *_append_str;
 extern PyObject *_push_str;
+extern PyObject *_popleft_str;
 extern PyObject *_json_module;
 extern PyObject *_threading_module;
 extern PyObject *_threading_lock;
@@ -52,6 +54,7 @@ extern PyObject *_type_f;
 extern PyObject *_items;
 extern PyObject *_type_to_symbol;
 extern PyObject *_string_class;
+extern PyObject *_list_class;
 extern PyObject *_int_symbol;
 extern PyObject *_float_symbol;
 extern PyObject *_bytes_symbol;
@@ -74,6 +77,7 @@ extern PyObject *_datetime_formatstring;
 extern PyObject *_strptime_str;
 extern PyObject *_strftime_str;
 extern PyObject *_timestamp_str;
+extern PyObject *_isinstance_f;
 
 #define INT_SYMBOL '#'
 #define FLOAT_SYMBOL '%'

@@ -27,8 +27,8 @@ PyObject *_debug_str = NULL;
 PyObject *_collections_module = NULL;
 PyObject *_deq_class = NULL;
 PyObject *_pop_str = NULL;
-PyObject *_push_str = NULL;
-PyObject *_json_module = NULL;
+PyObject *_popleft_str = NULL;
+PyObject *_append_str = NULL;
 PyObject *_threading_module = NULL;
 PyObject *_threading_lock = NULL;
 PyObject *_threading_cond = NULL;
@@ -45,6 +45,7 @@ PyObject *_type_f = NULL;
 PyObject *_items = NULL;
 PyObject *_type_to_symbol = NULL;
 PyObject *_string_class = NULL;
+PyObject *_list_class = NULL;
 PyObject *_int_symbol = NULL;
 PyObject *_float_symbol = NULL;
 PyObject *_bytes_symbol = NULL;
@@ -68,6 +69,7 @@ PyObject *_datetime_symbol = NULL;
 PyObject *_strptime_str = NULL;
 PyObject *_strftime_str = NULL;
 PyObject *_timestamp_str = NULL;
+PyObject *_isinstance_f = NULL;
 
 
 // error handling
@@ -281,15 +283,14 @@ int32_t ensure_py_deps() {
     if (_pop_str == NULL) {
         return -1;
     }
-    _push_str = PyUnicode_FromString("append");
-    if (_push_str == NULL) {
+    _append_str = PyUnicode_FromString("append");
+    if (_append_str == NULL) {
         return -1;
     }
-    _json_module = PyImport_ImportModule("json");
-    if (_json_module == NULL) {
+    _popleft_str = PyUnicode_FromString("popleft");
+    if (_popleft_str == NULL) {
         return -1;
     }
-
     _threading_module = PyImport_ImportModule("threading");
     if (_threading_module == NULL) {
         return -1;
@@ -380,8 +381,8 @@ int32_t ensure_py_deps() {
     if (_string_class == NULL) {
         return -1;
     }
-    PyObject *list_class = PyDict_GetItemString(_builtins, "list");
-    if (list_class == NULL) {
+    _list_class = PyDict_GetItemString(_builtins, "list");
+    if (_list_class == NULL) {
         return -1;
     }
     PyObject *tuple_class = PyDict_GetItemString(_builtins, "tuple");
@@ -436,10 +437,10 @@ int32_t ensure_py_deps() {
     if (_list_symbol == NULL) {
         return -1;
     }
-    if (PyDict_SetItem(_type_to_symbol, list_class, _list_symbol)) {
+    if (PyDict_SetItem(_type_to_symbol, _list_class, _list_symbol)) {
         return -1;
     }
-    Py_DECREF(list_class);
+    Py_DECREF(_list_class);
     Py_DECREF(_list_symbol);
 
     _tuple_symbol = PyBytes_FromFormat("%c", LIST_SYMBOL);
@@ -461,16 +462,6 @@ int32_t ensure_py_deps() {
     }
     Py_DECREF(bool_class);
     Py_DECREF(_bool_symbol);
-
-    _json_dumps_f = PyObject_GetAttrString(_json_module, "dumps");
-    if (_json_dumps_f == NULL) {
-        return -1;
-    }
-
-    _json_loads_f = PyObject_GetAttrString(_json_module, "loads");
-    if (_json_loads_f == NULL) {
-        return -1;
-    }
 
     _decode_str = PyUnicode_FromString("decode");
     if (_decode_str == NULL) {

@@ -119,6 +119,15 @@ int32_t dispatch(foo_kv_server *server, int32_t connid, const uint8_t *buff, int
         case CMD_DEL:
             err = do_del(server, subcmds + 1, subcmd_to_len + 1, nstrs - 1, response);
             break;
+        case CMD_QUEUE:
+            err = do_queue(server, subcmds + 1, subcmd_to_len + 1, nstrs - 1, response);
+            break;
+        case CMD_PUSH:
+            err = do_push(server, subcmds + 1, subcmd_to_len + 1, nstrs - 1, response);
+            break;
+        case CMD_POP:
+            err = do_pop(server, subcmds + 1, subcmd_to_len + 1, nstrs - 1, response);
+            break;
         default:
             log_error("dispatch(): got unrecognized command");
             response->status = RES_BAD_CMD;
@@ -432,6 +441,264 @@ int32_t do_del(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_
     return 0;
 
 }
+
+int32_t do_queue(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response) {
+
+    #if _FOO_KV_DEBUG == 1
+    log_debug("do_queue(): got request");
+    #endif
+
+    if (nargs < 1 || nargs > 2) {
+        response->status = RES_BAD_ARGS;
+        return 0;
+    }
+
+    PyObject *loaded_key = _loads_hashable((char *)args[0], arg_to_len[0]);
+    if (!loaded_key) {
+        error_handler(response);
+        return 0;
+    }
+
+    #if _FOO_KV_DEBUG == 1
+    log_debug("do_queue(): loaded key");
+    #endif
+
+    PyObject *deq_obj = PyObject_CallNoArgs(_deq_class);
+    if (!deq_obj) {
+        _dispatch_errno = RES_ERR_SERVER;
+        return 0;
+    }
+
+    #if _FOO_KV_DEBUG == 1
+    log_debug("do_queue(): loaded val");
+    #endif
+
+    if (nargs == 3) {
+        PyObject *loaded_ttl = _loads_foo_datetime((char *)args[2], arg_to_len[2]);
+        if (!loaded_ttl) {
+            error_handler(response);
+            return 0;
+        }
+        #if _FOO_KV_DEBUG == 1
+        log_debug("do_queue(): loaded ttl");
+        #endif
+        if (foo_kv_ttl_heap_put_dt(server->storage_ttl_heap, loaded_key, loaded_ttl)) {
+            log_error("do_queue(): unable to set ttl on item, exiting!");
+            response->status = RES_ERR_SERVER;
+            return 0;
+        }
+    } else {
+        if (foo_kv_ttl_heap_invalidate(server->storage_ttl_heap, loaded_key)) {
+            log_error("do_queue(): unable to invalidate previous ttl, exiting");
+            response->status = RES_ERR_SERVER;
+            return 0;
+        }
+    }
+
+    if (threadsafe_sem_wait(server->storage_lock)) {
+        log_error("do_queue(): encountered error trying to acquire storage lock");
+        response->status = RES_ERR_SERVER;
+        return 0;
+    }
+
+    int32_t res = PyDict_SetItem(server->storage, loaded_key, deq_obj);
+
+    Py_DECREF(loaded_key);
+    Py_DECREF(deq_obj);
+
+    if (sem_post(server->storage_lock)) {
+        log_error("do_queue(): failed to release lock");
+        response->status = RES_ERR_SERVER;
+        return 0;
+    }
+
+    if (res) {
+        log_error("do_queue(): got error setting item in storage: perhaps this is expected");
+        response->status = RES_ERR_SERVER;
+        return 0;
+    }
+
+    response->status = RES_OK;
+    return 0;
+
+}
+
+int32_t do_push(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response) {
+
+    #if _FOO_KV_DEBUG == 1
+    log_debug("do_push(): got request");
+    #endif
+
+    if (nargs != 2) {
+        response->status = RES_BAD_ARGS;
+        return 0;
+    }
+
+    PyObject *loaded_key = _loads_hashable((char *)args[0], arg_to_len[0]);
+    if (!loaded_key) {
+        error_handler(response);
+        return 0;
+    }
+
+    #if _FOO_KV_DEBUG == 1
+    log_debug("do_push(): loaded key");
+    #endif
+
+    PyObject *loaded_val = _loads_collectable((char *)args[1], arg_to_len[1]);
+    if (!loaded_val) {
+        error_handler(response);
+        return 0;
+    }
+
+    #if _FOO_KV_DEBUG == 1
+    log_debug("do_push(): loaded val");
+    #endif
+
+    // TODO seems like just the deq should be locked, in opposed to all of storage?
+    if (threadsafe_sem_wait(server->storage_lock)) {
+        log_error("do_push(): encountered error trying to acquire storage lock");
+        response->status = RES_ERR_SERVER;
+        return -1;
+    }
+
+    int32_t err = 0;
+
+    PyObject *deq_obj = PyDict_GetItem(server->storage, loaded_key);
+    Py_DECREF(loaded_key);
+    if (!deq_obj) {
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+        }
+        response->status = RES_BAD_KEY;
+        goto DO_PUSH_END;
+    }
+
+    Py_INCREF(_deq_class);
+    int32_t is_valid = PyObject_IsInstance(deq_obj, _deq_class);
+    Py_DECREF(_deq_class);
+    if (is_valid < 0) {
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+        }
+        log_error("do_push(): could not determine if item is a deque");
+        response->status = RES_ERR_SERVER;
+        goto DO_PUSH_END;
+    }
+    if (is_valid == 0) {
+        log_error("do_push(): item at key is not a deq");
+        response->status = RES_BAD_OP;
+        goto DO_PUSH_END;
+        return 0;
+    }
+
+    PyObject *push_result = PyObject_CallMethodObjArgs(deq_obj, _append_str, loaded_val, NULL);
+    Py_DECREF(loaded_val);
+
+    if (!push_result) {
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+        }
+        log_error("do_push(): append call raised an error");
+        response->status = RES_ERR_SERVER;
+        goto DO_PUSH_END;
+    }
+    Py_DECREF(push_result);
+
+    response->status = RES_OK;
+
+DO_PUSH_END:
+    if (sem_post(server->storage_lock)) {
+        log_error("do_push(): failed to release lock");
+        response->status = RES_ERR_SERVER;
+        return -1;
+    }
+
+    return err;
+
+}
+
+int32_t do_pop(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response) {
+
+    #if _FOO_KV_DEBUG == 1
+    log_debug("do_pop(): got request");
+    #endif
+
+    if (nargs != 1) {
+        response->status = RES_BAD_ARGS;
+        return 0;
+    }
+
+    PyObject *loaded_key = _loads_hashable((char *)args[0], arg_to_len[0]);
+    if (!loaded_key) {
+        error_handler(response);
+        return 0;
+    }
+
+    // TODO seems like just the deq should be locked, in opposed to all of storage?
+    if (threadsafe_sem_wait(server->storage_lock)) {
+        log_error("do_pop(): encountered error trying to acquire storage lock");
+        response->status = RES_ERR_SERVER;
+        return -1;
+    }
+
+    PyObject *deq_obj = PyDict_GetItem(server->storage, loaded_key);
+    Py_DECREF(loaded_key);
+    if (!deq_obj) {
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+        }
+        response->status = RES_BAD_KEY;
+        goto DO_POP_END;
+    }
+
+    Py_INCREF(_deq_class);
+    int32_t is_valid = PyObject_IsInstance(deq_obj, _deq_class);
+    Py_DECREF(_deq_class);
+    if (is_valid < 0) {
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+        }
+        log_error("do_pop(): could not determine if item is a deque");
+        response->status = RES_ERR_SERVER;
+        goto DO_POP_END;
+    }
+    if (is_valid == 0) {
+        log_error("do_pop(): item at key is not a deque");
+        response->status = RES_BAD_OP;
+        goto DO_POP_END;
+        return 0;
+    }
+
+    PyObject *pop_result = PyObject_CallMethodObjArgs(deq_obj, _popleft_str, NULL);
+    if (!pop_result) {
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+        }
+        response->status = RES_BAD_IX;
+        goto DO_POP_END;
+    }
+
+    PyObject *dumped_result = dumps_as_pyobject(pop_result);
+    Py_DECREF(pop_result);
+    if (!dumped_result) {
+        log_error("do_pop(): was not able to dump item");
+        error_handler(response);
+        goto DO_POP_END;
+    }
+
+    response->status = RES_OK;
+    response->payload = dumped_result;
+
+DO_POP_END:
+    if (sem_post(server->storage_lock)) {
+        log_error("do_pop(): failed to release lock");
+        response->status = RES_ERR_SERVER;
+        return -1;
+    }
+
+    return 0;
+}
+
 
 
 // helper methods
