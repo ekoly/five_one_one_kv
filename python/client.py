@@ -1,20 +1,20 @@
 import collections
-import io
+import logging
 import socket
 import struct
-import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Tuple, Union
 
 from five_one_one_kv.c import (
     MAX_MSG_SIZE,
     RES_BAD_ARGS,
     RES_BAD_CMD,
+    RES_BAD_COLLECTION,
     RES_BAD_HASH,
     RES_BAD_IX,
     RES_BAD_KEY,
     RES_BAD_OP,
     RES_BAD_TYPE,
-    RES_BAD_COLLECTION,
     RES_ERR_CLIENT,
     RES_ERR_SERVER,
     RES_OK,
@@ -148,54 +148,94 @@ _code_to_exc[RES_BAD_OP] = AttributeError(
 )
 _code_to_exc[RES_BAD_IX] = IndexError("")
 _code_to_exc[RES_BAD_HASH] = TypeError("Tried to send an unhashable type as a key")
-_code_to_exc[RES_BAD_COLLECTION] = TypeError("Cannot embed a collection in another collection.")
+_code_to_exc[RES_BAD_COLLECTION] = TypeError(
+    "Cannot embed a collection in another collection."
+)
 
 
 class Client:
     def __init__(self):
         self._sock = socket.create_connection(("0.0.0.0", 8513))
 
-    def _send(self, data: bytes) -> None:
+    def close(self):
+        self._sock.shutdown(socket.SHUT_RDWR)
+        self._sock.close()
+
+    def _submit(self, key: Any, data: bytes, suppress_errors: tuple = None):
         if len(data) > MAX_MSG_SIZE:
             raise TooLargeError("Message size was too large.")
         self._sock.send(data)
+        status, data = self._looped_recv()
+        if status == RES_OK:
+            if data:
+                return loads(data)
+            return None
+        if suppress_errors:
+            try:
+                raise _code_to_exc[status]
+            except suppress_errors:
+                return None
+        raise _code_to_exc[status]
 
     def get(self, key: Any) -> bytes:
         key = dumps_hashable(key)
-        self._send(_pack(b"get", key))
-        status, data = self._looped_recv()
-        if status == RES_OK:
-            return loads(data)
-        if status == RES_BAD_KEY:
-            return None
-        raise _code_to_exc[status]
+        return self._submit(key, _pack(b"get", key), suppress_errors=(KeyError,))
 
     def __getitem__(self, key: Any) -> Any:
         key = dumps_hashable(key)
-        self._send(_pack(b"get", key))
-        status, data = self._looped_recv()
-        if status == RES_OK:
-            return loads(data)
-        if status == RES_BAD_KEY:
-            raise KeyError("key %s not found in server" % (key,))
-        raise _code_to_exc[status]
+        return self._submit(key, _pack(b"get", key))
 
     def __setitem__(self, key: Any, val: Any) -> None:
+        """
+        Sends a request to the server to set `key` to `val`, potentially
+        overwriting existing data at `key`.
+        """
         key = dumps_hashable(key)
         val = dumps(val)
-        self._send(_pack(b"put", key, val))
-        status, data = self._looped_recv()
-        if status == RES_OK:
-            return
-        raise _code_to_exc[status]
+        return self._submit(key, _pack(b"put", key, val))
+
+    def set(
+        self, key: Any, val: Any, ttl: Union[datetime, timedelta, int, None] = None
+    ) -> None:
+        """
+        Sends a request to the server to set `key` to `val`, potentially
+        overwriting existing data at `key`.
+
+        Args:
+            key: the key to be set.
+            val: the value to be set.
+            ttl (optional): If given, the server will automatically delete
+                the value after a time. If a `datetime` is given, it will be
+                deleted at this time.  If a `timedelta` is given, it will be
+                deleted after this amount of time. If an int is given, it will
+                be deleted after this many seconds.
+        """
+        key = dumps_hashable(key)
+        val = dumps(val)
+        if ttl is not None:
+            dt_ttl = None
+            if isinstance(ttl, int):
+                dt_ttl = datetime.now(tz=timezone.utc)
+                dt_ttl += timedelta(seconds=ttl)
+            elif isinstance(ttl, timedelta):
+                dt_ttl = datetime.now(tz=timezone.utc)
+                dt_ttl += ttl
+            elif isinstance(ttl, datetime):
+                if ttl.tzinfo is None:
+                    dt_ttl = ttl.astimezone()
+                else:
+                    dt_ttl = ttl
+            else:
+                raise TypeError(
+                    "ttl argument must be datetime, timedelta, or int if given"
+                )
+            ttl = dumps(dt_ttl)
+            return self._submit(key, _pack(b"put", key, val, ttl))
+        return self._submit(key, _pack(b"put", key, val))
 
     def __delitem__(self, key: Any) -> None:
         key = dumps_hashable(key)
-        self._send(_pack(b"del", key))
-        status, data = self._looped_recv()
-        if status == RES_OK:
-            return
-        raise _code_to_exc[status]
+        self._submit(key, _pack(b"del", key))
 
     def _looped_recv(self):
         response = b""
@@ -212,46 +252,25 @@ class Client:
         return status, data
 
 
-class Pipeline:
+class Pipeline(Client):
     def __init__(self):
         self._sock = socket.create_connection(("0.0.0.0", 8513))
         self._keys = []
         self._wbuff = []
 
-    def _save(self, data: bytes) -> None:
+    def _submit(self, key: Any, data: bytes, suppress_errors: tuple = tuple()) -> None:
         if len(data) > MAX_MSG_SIZE:
             raise TooLargeError("Message size was too large.")
+        self._keys.append(key)
         self._wbuff.append(data)
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self):
-        self._exec()
-
-    def submit(self):
+    def execute(self):
         res = self._exec()
         return res
 
     def _exec(self):
         self._sock.send(b"".join(self._wbuff))
         return self._looped_recv()
-
-    def get(self, key: Any) -> bytes:
-        key = dumps_hashable(key)
-        self._keys.append(key)
-        self._save(_pack(b"get", key))
-
-    def __setitem__(self, key: Any, val: Any) -> None:
-        key = dumps_hashable(key)
-        self._keys.append(key)
-        val = dumps(val)
-        self._save(_pack(b"put", key, val))
-
-    def __delitem__(self, key: Any) -> None:
-        key = dumps_hashable(key)
-        self._keys.append(key)
-        self._save(_pack(b"del", key))
 
     def _looped_recv(self):
         response = b""

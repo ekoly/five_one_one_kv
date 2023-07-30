@@ -7,9 +7,14 @@
 #include <math.h>
 #include <Python.h>
 
-#include "server.h"
+#include "pythontypes.h"
 #include "util.h"
+#include "connection.h"
 #include "dispatch.h"
+#include "ttl.h"
+
+// CHANGE ME
+#define _FOO_KV_DEBUG 1
 
 int16_t _dispatch_errno = 0;
 
@@ -109,7 +114,7 @@ int32_t dispatch(foo_kv_server *server, int32_t connid, const uint8_t *buff, int
             err = do_get(server, subcmds + 1, subcmd_to_len + 1, nstrs - 1, response);
             break;
         case CMD_PUT:
-            err = do_put(server, subcmds + 1, subcmd_to_len + 1, nstrs - 1, response);
+            err = do_set(server, subcmds + 1, subcmd_to_len + 1, nstrs - 1, response);
             break;
         case CMD_DEL:
             err = do_del(server, subcmds + 1, subcmd_to_len + 1, nstrs - 1, response);
@@ -119,6 +124,31 @@ int32_t dispatch(foo_kv_server *server, int32_t connid, const uint8_t *buff, int
             response->status = RES_BAD_CMD;
             break;
     }
+
+    #if _FOO_KV_DEBUG == 1
+    log_debug("dispatch(): sanity checking storage");
+    Py_ssize_t ix = 0;
+    PyObject *key, *value;
+    while (PyDict_Next(server->storage, &ix, &key, &value) < 0) {
+        if (key->ob_refcnt <= 2 || key->ob_refcnt > 1000) {
+            PyObject *as_str = PyUnicode_FromFormat("%U", key);
+            PyObject *as_bytes = PyUnicode_AsUTF8String(as_str);
+            sprintf(debug_buffer, "dispatch(): sanity check: key %s has %ld refcnt", PyBytes_AS_STRING(as_bytes), key->ob_refcnt);
+            log_debug(debug_buffer);
+            Py_DECREF(as_str);
+            Py_DECREF(as_bytes);
+        }
+        if (value->ob_refcnt <= 2 || key->ob_refcnt > 1000) {
+            PyObject *as_str = PyUnicode_FromFormat("%U", value);
+            PyObject *as_bytes = PyUnicode_AsUTF8String(as_str);
+            sprintf(debug_buffer, "dispatch(): sanity check: value %s has %ld refcnt", PyBytes_AS_STRING(as_bytes), value->ob_refcnt);
+            log_debug(debug_buffer);
+            Py_DECREF(as_str);
+            Py_DECREF(as_bytes);
+        }
+    }
+    log_debug("dispatch(): sanity check complete");
+    #endif
 
     Py_DECREF(server->storage);
     Py_INCREF(server);
@@ -216,13 +246,13 @@ int32_t do_get(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_
 
 }
 
-int32_t do_put(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response) {
+int32_t do_set(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response) {
 
     #if _FOO_KV_DEBUG == 1
-    log_debug("do_put(): got request");
+    log_debug("do_set(): got request");
     #endif
 
-    if (nargs != 2) {
+    if (nargs < 2 || nargs > 3) {
         response->status = RES_BAD_ARGS;
         return 0;
     }
@@ -233,14 +263,44 @@ int32_t do_put(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_
         return 0;
     }
 
+    #if _FOO_KV_DEBUG == 1
+    log_debug("do_set(): loaded key");
+    #endif
+
     PyObject *loaded_val = loads((char *)args[1], arg_to_len[1]);
     if (!loaded_val) {
         error_handler(response);
         return 0;
     }
 
+    #if _FOO_KV_DEBUG == 1
+    log_debug("do_set(): loaded val");
+    #endif
+
+    if (nargs == 3) {
+        PyObject *loaded_ttl = _loads_foo_datetime((char *)args[2], arg_to_len[2]);
+        if (!loaded_ttl) {
+            error_handler(response);
+            return 0;
+        }
+        #if _FOO_KV_DEBUG == 1
+        log_debug("do_set(): loaded ttl");
+        #endif
+        if (foo_kv_ttl_heap_put_dt(server->storage_ttl_heap, loaded_key, loaded_ttl)) {
+            log_error("do_set(): unable to set ttl on item, exiting!");
+            response->status = RES_ERR_SERVER;
+            return 0;
+        }
+    } else {
+        if (foo_kv_ttl_heap_invalidate(server->storage_ttl_heap, loaded_key)) {
+            log_error("do_set(): unable to invalidate previous ttl, exiting");
+            response->status = RES_ERR_SERVER;
+            return 0;
+        }
+    }
+
     if (threadsafe_sem_wait(server->storage_lock)) {
-        log_error("do_put(): encountered error trying to acquire storage lock");
+        log_error("do_set(): encountered error trying to acquire storage lock");
         response->status = RES_ERR_SERVER;
         return 0;
     }
@@ -251,13 +311,13 @@ int32_t do_put(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_
     Py_DECREF(loaded_val);
 
     if (sem_post(server->storage_lock)) {
-        log_error("do_put(): failed to release lock");
+        log_error("do_set(): failed to release lock");
         response->status = RES_ERR_SERVER;
         return 0;
     }
 
     if (res) {
-        log_error("do_put(): got error setting item in storage: perhaps this is expected");
+        log_error("do_set(): got error setting item in storage: perhaps this is expected");
         response->status = RES_ERR_SERVER;
         return 0;
     }
@@ -330,11 +390,17 @@ int32_t do_del(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_
     */
 
     // PyDict_DelItem segfaults randomly
-    /*
     res = _pyobject_safe_delitem(server->storage, loaded_key);
+    //res = PyDict_DelItem(server->storage, loaded_key);
     Py_DECREF(loaded_key);
-    */
-    res = PyDict_DelItem(server->storage, loaded_key);
+    if (res < 0) {
+        log_error("do_del(): py operation resulted in error");
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+        }
+        response->status = RES_ERR_SERVER;
+        return -1;
+    }
 
     #if _FOO_KV_DEBUG == 1
     log_debug("do_del(): got res");
@@ -350,22 +416,10 @@ int32_t do_del(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_
     log_debug("do_del(): got past release lock");
     #endif
 
-    /*
-    if (res < 0) {
-        log_error("do_del(): py operation resulted in error");
-        PyErr_Clear();
-        response->status = RES_ERR_SERVER;
-        return -1;
-    }
-    */
-
-    if (res < 0) {
+    if (res == 0) {
         #if _FOO_KV_DEBUG == 1
         log_debug("do_del(): key was not in storage: perhaps this is expected");
         #endif
-        if (PyErr_Occurred()) {
-            PyErr_Clear();
-        }
         response->status = RES_BAD_KEY;
         return 0;
     }
@@ -418,6 +472,8 @@ PyObject *dumps_as_pyobject(PyObject *x) {
                 return PyBytes_FromFormat("%c%c", s, '0');
             }
             return NULL;
+        case DATETIME_SYMBOL:
+            return _dumps_datetime(x);
         default:
             _dispatch_errno = RES_BAD_TYPE;
             return NULL;
@@ -427,6 +483,8 @@ PyObject *dumps_as_pyobject(PyObject *x) {
 
 }
 
+// the following is deprecated and also doesn't really work
+// because the PyObject refcount is not properly handled
 const char *dumps(PyObject *x) {
 
     PyObject *res = dumps_as_pyobject(x);
@@ -468,7 +526,9 @@ PyObject *_dumps_unicode(PyObject *x) {
     if (!b) {
         return NULL;
     }
-    return PyBytes_FromFormat("%c%s", STRING_SYMBOL, PyBytes_AS_STRING(b));
+    PyObject *res = PyBytes_FromFormat("%c%s", STRING_SYMBOL, PyBytes_AS_STRING(b));
+    Py_DECREF(b);
+    return res;
 }
 
 PyObject *_dumps_list(PyObject *x) {
@@ -535,16 +595,52 @@ PyObject *_dumps_list(PyObject *x) {
 
 }
 
+PyObject *_dumps_datetime(PyObject *x) {
+
+    PyObject *dts = PyObject_CallMethodOneArg(x, _strftime_str, _datetime_formatstring);
+    if (!dts) {
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+        }
+        _dispatch_errno = RES_BAD_TYPE;
+        return NULL;
+    }
+
+    PyObject *dts_with_symbol = PyUnicode_FromFormat("%c%U", DATETIME_SYMBOL, dts);
+    Py_DECREF(dts);
+    if (!dts_with_symbol) {
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+        }
+        _dispatch_errno = RES_BAD_TYPE;
+        return NULL;
+    }
+
+    PyObject *result = PyUnicode_AsUTF8String(dts_with_symbol);
+    Py_DECREF(dts_with_symbol);
+    if (!result) {
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+        }
+        _dispatch_errno = RES_UNKNOWN;
+        return NULL;
+    }
+
+    return result;
+
+}
 
 PyObject *_dumps_hashable_as_pyobject(PyObject *x) {
 
     PyObject *x_type = PyObject_CallOneArg(_type_f, x);
     if (!x_type) {
+        _dispatch_errno = RES_BAD_TYPE;
         return NULL;
     }
     PyObject *symbol = PyDict_GetItem(_type_to_symbol, x_type);
     Py_DECREF(x_type);
     if (!symbol) {
+        _dispatch_errno = RES_BAD_TYPE;
         return NULL;
     }
 
@@ -561,6 +657,7 @@ PyObject *_dumps_hashable_as_pyobject(PyObject *x) {
             return PyBytes_FromFormat("%c%s", BYTES_SYMBOL, PyBytes_AS_STRING(x));
         case LIST_SYMBOL:
         case BOOL_SYMBOL:
+        case DATETIME_SYMBOL:
             _dispatch_errno = RES_BAD_HASH;
             return NULL;
         default:
@@ -607,6 +704,8 @@ PyObject *_dumps_collectable_as_pyobject(PyObject *x) {
                 return PyBytes_FromFormat("%c%c", BOOL_SYMBOL, '0');
             }
             return NULL;
+        case DATETIME_SYMBOL:
+            return _dumps_datetime(x);
         default:
             _dispatch_errno = RES_BAD_TYPE;
             return NULL;
@@ -616,11 +715,16 @@ PyObject *_dumps_collectable_as_pyobject(PyObject *x) {
 
 }
 
+PyObject *_dumps_datetime_as_pyobject(PyObject *x) {
+    return _dumps_datetime(x);
+}
+
 
 PyObject *loads_from_pyobject(PyObject *x) {
 
     char *res = PyBytes_AsString(x);
     if (!res) {
+        _dispatch_errno = RES_BAD_TYPE;
         return NULL;
     }
 
@@ -649,6 +753,8 @@ PyObject *loads(const char *x, int32_t len) {
             return _loads_list(x + 1, len - 1);
         case BOOL_SYMBOL:
             return _loads_bool(x + 1, len - 1);
+        case DATETIME_SYMBOL:
+            return _loads_datetime(x + 1, len - 1);
         default:
             _dispatch_errno = RES_BAD_TYPE;
             return NULL;
@@ -684,7 +790,6 @@ PyObject *_loads_float(const char *x, int32_t len) {
 
 PyObject *_loads_unicode(const char *x, int32_t len) {
     return PyUnicode_DecodeUTF8(x, len, "strict");
-
 }
 
 PyObject *_loads_bool(const char *x, int32_t len) {
@@ -820,6 +925,32 @@ PyObject *_loads_list(const char *x, int32_t len) {
 
 }
 
+PyObject *_loads_datetime(const char *x, int32_t len) {
+
+    PyObject *xs = PyUnicode_FromStringAndSize(x, len);
+    if (!xs) {
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+        }
+        _dispatch_errno = RES_BAD_TYPE;
+        return NULL;
+    }
+
+    PyObject *res = PyObject_CallMethodObjArgs(_datetime_class, _strptime_str, xs, _datetime_formatstring, NULL);
+    Py_DECREF(xs);
+
+    if (!res) {
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+        }
+        _dispatch_errno = RES_BAD_TYPE;
+        return NULL;
+    }
+
+    return res;
+
+}
+
 
 PyObject *_loads_from_pyobject(PyObject *x) {
 
@@ -852,6 +983,7 @@ PyObject *_loads_hashable(const char *x, int32_t len) {
             return PyBytes_FromStringAndSize(x + 1, len - 1);
         case LIST_SYMBOL:
         case BOOL_SYMBOL:
+        case DATETIME_SYMBOL:
             _dispatch_errno = RES_BAD_HASH;
             return NULL;
         default:
@@ -898,6 +1030,8 @@ PyObject *_loads_collectable(const char *x, int32_t len) {
             return NULL;
         case BOOL_SYMBOL:
             return _loads_bool(x + 1, len - 1);
+        case DATETIME_SYMBOL:
+            return _loads_datetime(x + 1, len - 1);
         default:
             _dispatch_errno = RES_BAD_TYPE;
             return NULL;
@@ -922,5 +1056,36 @@ PyObject *_loads_collectable_from_pyobject(PyObject *x) {
     }
 
     return _loads_collectable(res, len);
+
+}
+
+PyObject *_loads_foo_datetime(const char *x, int32_t len) {
+
+    switch (x[0]) {
+        case DATETIME_SYMBOL:
+            return _loads_datetime(x + 1, len - 1);
+        default:
+            _dispatch_errno = RES_BAD_TYPE;
+            return NULL;
+    }
+
+    return NULL;
+
+}
+
+PyObject *_loads_foo_datetime_from_pyobject(PyObject *x) {
+
+    char *res = PyBytes_AsString(x);
+    if (!res) {
+        return NULL;
+    }
+
+    int32_t len = PyObject_Length(x);
+    if (!len) {
+        _dispatch_errno = RES_BAD_TYPE;
+        return NULL;
+    }
+
+    return _loads_datetime(res, len);
 
 }

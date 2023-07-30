@@ -16,10 +16,19 @@
 #include <Python.h>
 #include "structmember.h"
 
-#include "module.h"
 #include "util.h"
-#include "server.h"
+#include "connection.h"
+#include "module.h"
+#include "connection_io.h"
 #include "dispatch.h"
+#include "ttl.h"
+
+// CHANGE ME
+#define _FOO_KV_DEBUG 1
+// there is a consistently reproducible segfault when _FOO_KV_POLL_DEBUG is 0
+#define _FOO_KV_POLL_DEBUG 1
+// _FOO_KV_IO_DEBUG can be left as 0 in most circumstances
+#define _FOO_KV_IO_DEBUG 1
 
 
 // init/dealloc methods for foo_kv_server
@@ -188,7 +197,7 @@ static int foo_kv_server_tp_init(foo_kv_server *self, PyObject *args, PyObject *
     log_debug("got past listen()");
     #endif
 
-    self->fd_to_conn = PyMem_RawCalloc(1, sizeof(struct conn_array_t));
+    self->fd_to_conn = PyMem_RawCalloc(1, sizeof(struct connarray_t));
     if (connarray_init(self->fd_to_conn, 8)) {
         log_error("PyMem_RawCalloc() failed to allocate memory");
         return -1;
@@ -221,7 +230,7 @@ static PyObject *foo_kv_function_dumps(PyObject *self, PyObject *const *args, Py
         } else if (_dispatch_errno == RES_BAD_COLLECTION) {
             PyErr_SetString(_embedded_collection_error, "Did not recognize the argument type");
         } else {
-            PyErr_SetString(PyExc_ValueError, "There was a problem parsing the argument");
+            PyErr_SetString(PyExc_ValueError, "There was an unknown problem with the argument");
         }
         return NULL;
     }
@@ -255,7 +264,36 @@ static PyObject *foo_kv_function_dumps_hashable(PyObject *self, PyObject *const 
                 PyErr_SetString(_not_hashable_error, "Cannot hash the given type");
                 break;
             default:
-                PyErr_SetString(PyExc_ValueError, "There was a problem parsing the argument");
+                PyErr_SetString(PyExc_ValueError, "There was an unknown problem with the argument");
+                break;
+        }
+        return NULL;
+    }
+
+    return res;
+
+}
+
+static PyObject *foo_kv_function_dumps_datetime(PyObject *self, PyObject *const *args, Py_ssize_t nargs) {
+
+    if (nargs != 1) {
+        PyErr_SetString(PyExc_TypeError, "wrong number of arguments to `dumps_hashable`, expects 1.");
+        return NULL;
+    }
+
+    if (ensure_py_deps()) {
+        return NULL;
+    }
+
+    PyObject *res = _dumps_datetime_as_pyobject(args[0]);
+
+    if (!res) {
+        switch (_dispatch_errno) {
+            case RES_BAD_TYPE:
+                PyErr_SetString(PyExc_TypeError, "Did not recognize the argument type");
+                break;
+            default:
+                PyErr_SetString(PyExc_ValueError, "There was an unknown problem with the argument");
                 break;
         }
         return NULL;
@@ -269,6 +307,11 @@ static PyObject *foo_kv_function_loads(PyObject *self, PyObject *const *args, Py
 
     if (nargs != 1) {
         PyErr_SetString(PyExc_TypeError, "wrong number of arguments to `loads`, expects 1.");
+        return NULL;
+    }
+
+    if (!PyBytes_Check(args[0])) {
+        PyErr_SetString(PyExc_TypeError, "Did not recognize the argument type");
         return NULL;
     }
 
@@ -289,7 +332,7 @@ static PyObject *foo_kv_function_loads(PyObject *self, PyObject *const *args, Py
         } else if (_dispatch_errno == RES_BAD_COLLECTION) {
             PyErr_SetString(_embedded_collection_error, "Did not recognize the argument type");
         } else {
-            PyErr_SetString(PyExc_ValueError, "There was a problem parsing the argument");
+            PyErr_SetString(PyExc_ValueError, "There was an unknown problem parsing the argument");
         }
         return NULL;
     }
@@ -320,7 +363,7 @@ static PyObject *foo_kv_function_loads_hashable(PyObject *self, PyObject *const 
         } else if (_dispatch_errno == RES_BAD_HASH) {
             PyErr_SetString(_not_hashable_error, "Given type is unhashable");
         } else {
-            PyErr_SetString(PyExc_ValueError, "There was a problem parsing the argument");
+            PyErr_SetString(PyExc_ValueError, "There was an unknown problem parsing the argument");
         }
         return NULL;
     }
@@ -378,7 +421,7 @@ static PyObject *foo_kv_server_tp_method_io_loop(PyObject *self, PyObject *const
 // helper methods
 static void *poll_loop(foo_kv_server *kv_self) {
 
-    struct conn_array_t *fd_to_conn = kv_self->fd_to_conn;
+    struct connarray_t *fd_to_conn = kv_self->fd_to_conn;
 
     nfds_t poll_args_size = 0;
     struct pollfd *poll_args = (struct pollfd *)PyMem_RawCalloc(1, sizeof(struct pollfd));
@@ -386,7 +429,7 @@ static void *poll_loop(foo_kv_server *kv_self) {
     int32_t has_lock;
     // keep track of number of active connections
     #if _FOO_KV_POLL_DEBUG == 1
-    int32_t max_io_workers = kv_self->num_threads - 1;
+    int32_t max_io_workers = kv_self->num_threads - 2;
     #endif
     int32_t num_active = 0;
     int32_t poll_timeout = 0;
@@ -622,7 +665,7 @@ static void *poll_loop(foo_kv_server *kv_self) {
 
         // accept new connections
         if (poll_args[0].revents) {
-            accept_new_conn(fd_to_conn, kv_self->fd);
+            while (accept_new_conn(fd_to_conn, kv_self->fd) < 0) {}
         }
 
         #if _FOO_KV_POLL_DEBUG == 1
@@ -637,7 +680,7 @@ static void *poll_loop(foo_kv_server *kv_self) {
 
 static void *io_loop(foo_kv_server *kv_self) {
 
-    struct conn_array_t *fd_to_conn = kv_self->fd_to_conn;
+    struct connarray_t *fd_to_conn = kv_self->fd_to_conn;
 
     #if _FOO_KV_IO_DEBUG == 1
     char debug_buff[256];
@@ -762,10 +805,70 @@ static void *io_loop(foo_kv_server *kv_self) {
 
 }
 
+static PyObject *foo_kv_server_tp_method_storage_ttl_loop(PyObject *self, PyObject *const *args, Py_ssize_t nargs) {
+
+    if (nargs != 0) {
+        PyErr_SetString(PyExc_TypeError, "ttl_loop expects no arguments.");
+        return NULL;
+    }
+
+    #if _FOO_KV_DEBUG == 1
+    log_debug("storage_ttl_loop(): starting");
+    #endif
+
+    foo_kv_server *kv_self = (foo_kv_server *)self;
+
+    kv_self->storage_ttl_heap = foo_kv_ttl_heap_new();
+    if (!kv_self->storage_ttl_heap) {
+        return NULL;
+    }
+
+    #if _FOO_KV_DEBUG == 1
+    log_debug("storage_ttl_loop(): got past init");
+    #endif
+
+    while (1) {
+        #if _FOO_KV_DEBUG == 1
+        log_debug("storage_ttl_loop(): beginning of loop");
+        #endif
+        PyObject *expired_key = foo_kv_ttl_heap_get(kv_self->storage_ttl_heap);
+
+        if (!expired_key) {
+            log_error("storage_ttl_loop(): got NULL key!");
+            return NULL;
+        }
+
+        if (threadsafe_sem_wait(kv_self->storage_lock)) {
+            log_error("storage_ttl_loop(): unable to acquire storage lock, unable to expire key");
+            continue;
+        }
+
+        if (PyDict_DelItem(kv_self->storage, expired_key)) {
+            #if _FOO_KV_DEBUG == 1
+            log_debug("storage_ttl_loop(): expired key was not found in storage, unable to expire, perhaps this is expected");
+            #endif
+            if (PyErr_Occurred()) {
+                PyErr_Clear();
+            }
+            continue;
+        }
+
+        if (sem_post(kv_self->storage_lock)) {
+            log_error("storage_ttl_loop(): unable to release storage lock!");
+            return NULL;
+        }
+
+    }
+
+    return NULL;
+
+}
+
 // server public methods
 static PyMethodDef foo_kv_server_tp_methods[] = {
     {"poll_loop", _PyCFunction_CAST(foo_kv_server_tp_method_poll_loop), METH_FASTCALL, "Start the server operations."},
     {"io_loop", _PyCFunction_CAST(foo_kv_server_tp_method_io_loop), METH_FASTCALL, "Start the server operations."},
+    {"storage_ttl_loop", _PyCFunction_CAST(foo_kv_server_tp_method_storage_ttl_loop), METH_FASTCALL, "Start the ttl operations."},
     {NULL, NULL, 0, NULL}
 };
 
@@ -821,6 +924,7 @@ static PyTypeObject FooKVServerType = {
 static PyMethodDef foo_kv_method_def[] = {
     {"dumps", _PyCFunction_CAST(foo_kv_function_dumps), METH_FASTCALL, "Serialize user data."},
     {"dumps_hashable", _PyCFunction_CAST(foo_kv_function_dumps_hashable), METH_FASTCALL, "Serialize user data, enforces hashable."},
+    {"dumps_datetime", _PyCFunction_CAST(foo_kv_function_dumps_datetime), METH_FASTCALL, "Serialize user data, enforces datetime."},
     {"loads", _PyCFunction_CAST(foo_kv_function_loads), METH_FASTCALL, "Deserialize user data."},
     {"loads_hashable", _PyCFunction_CAST(foo_kv_function_loads_hashable), METH_FASTCALL, "Deserialize user data, enforces hashable."},
     {"foo_hash", _PyCFunction_CAST(foo_kv_function_hash), METH_FASTCALL, "Get the hash of the user data."},

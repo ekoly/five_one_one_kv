@@ -68,6 +68,12 @@ extern PyObject *_empty_args;
 extern PyObject *_foo_exceptions_module;
 extern PyObject *_embedded_collection_error;
 extern PyObject *_not_hashable_error;
+extern PyObject *_datetime_module;
+extern PyObject *_datetime_class;
+extern PyObject *_datetime_formatstring;
+extern PyObject *_strptime_str;
+extern PyObject *_strftime_str;
+extern PyObject *_timestamp_str;
 
 #define INT_SYMBOL '#'
 #define FLOAT_SYMBOL '%'
@@ -76,6 +82,7 @@ extern PyObject *_not_hashable_error;
 #define LIST_SYMBOL '['
 #define TUPLE_SYMBOL '('
 #define BOOL_SYMBOL '?'
+#define DATETIME_SYMBOL '+'
 
 // this sets the above cached objects
 int32_t ensure_py_deps();
@@ -95,28 +102,6 @@ enum {
     STATE_RES_WAITING = 4,
     STATE_END = 5,
     STATE_TERM = 6,
-};
-
-struct conn_t {
-    int fd;
-    int32_t state;
-    int32_t err;
-    size_t rbuff_size;
-    size_t rbuff_read;
-    size_t rbuff_max;
-    uint8_t *rbuff;
-    size_t wbuff_size;
-    size_t wbuff_sent;
-    size_t wbuff_max;
-    uint8_t *wbuff;
-    int32_t connid;
-    sem_t *lock;
-
-};
-
-struct response_t {
-    int16_t status;
-    PyObject *payload;
 };
 
 // expected result
@@ -158,13 +143,6 @@ int32_t hash(const uint8_t *s);
 int32_t read_full(int fd, char *buff, size_t n); 
 int32_t write_all(int fd, const char *buff, size_t n);
 
-// connection management
-struct conn_t *conn_new(int connfd);
-int32_t conn_rbuff_resize(struct conn_t *conn, uint32_t newsize);
-int32_t conn_wbuff_resize(struct conn_t *conn, uint32_t newsize);
-int32_t conn_rbuff_flush(struct conn_t *conn);
-int32_t conn_write_response(struct conn_t *conn, const struct response_t *response);
-
 struct intq_node_t {
     struct intq_node_t *next;
     int32_t vals[INTQ_NODE_SIZE];
@@ -189,7 +167,9 @@ struct cond_t {
 };
 
 struct cond_t *cond_new();
+void cond_destroy(struct cond_t *cond);
 int32_t cond_wait(struct cond_t *cond);
+int32_t cond_timedwait(struct cond_t *cond, struct timespec *ttl);
 int32_t cond_notify(struct cond_t *cond);
 
 // threadsafe wrappers for sem

@@ -9,6 +9,9 @@
 
 #include "util.h"
 
+// CHANGE ME
+#define _FOO_KV_DEBUG 1
+
 // cached python objects
 int32_t is_py_deps_init = 0;
 PyObject *_builtins = NULL;
@@ -58,6 +61,13 @@ PyObject *_foo_exceptions_module = NULL;
 PyObject *_empty_args = NULL;
 PyObject *_embedded_collection_error = NULL;
 PyObject *_not_hashable_error = NULL;
+PyObject *_datetime_module = NULL;
+PyObject *_datetime_class = NULL;
+PyObject *_datetime_formatstring = NULL;
+PyObject *_datetime_symbol = NULL;
+PyObject *_strptime_str = NULL;
+PyObject *_strftime_str = NULL;
+PyObject *_timestamp_str = NULL;
 
 
 // error handling
@@ -175,9 +185,6 @@ int32_t hash(const uint8_t *s) {
 
 }
 
-// connections utility
-int32_t conncounter = 1;
-
 int32_t read_full(int fd, char *buff, size_t n) {
     while (n > 0) {
         ssize_t rv = read(fd, buff, n);
@@ -202,191 +209,6 @@ int32_t write_all(int fd, const char *buff, size_t n) {
         buff += rv;
     }
     return 0;
-}
-
-struct conn_t *conn_new(int connfd) {
-
-    struct conn_t *conn = PyMem_RawCalloc(1, sizeof(struct conn_t));
-    if (conn == NULL) {
-        close(connfd);
-        return NULL;
-    }
-    conn->fd = connfd;
-    conn->state = STATE_REQ_WAITING;
-    conn->err = 0;
-    conn->rbuff_size = 0;
-    conn->rbuff_read = 0;
-    conn->rbuff_max = DEFAULT_MSG_SIZE;
-    conn->wbuff_size = 0;
-    conn->wbuff_sent = 0;
-    conn->wbuff_max = DEFAULT_MSG_SIZE;
-    conn->connid = conncounter++;
-
-    conn->rbuff = PyMem_RawCalloc(DEFAULT_MSG_SIZE, sizeof(uint8_t));
-    if (!conn->rbuff) {
-        return NULL;
-    }
-    conn->wbuff = PyMem_RawCalloc(DEFAULT_MSG_SIZE, sizeof(uint8_t));
-    if (!conn->wbuff) {
-        return NULL;
-    }
-
-    conn->lock = PyMem_RawCalloc(1, sizeof(sem_t));
-    if (!conn->lock) {
-        close(connfd);
-        return NULL;
-    }
-    sem_init(conn->lock, 0, 1);
-
-    return conn;
-
-}
-
-int32_t conn_rbuff_resize(struct conn_t *conn, uint32_t newsize) {
-
-    uint8_t *newbuff;
-
-    if (newsize == 0) {
-        return -1;
-    }
-
-    if (conn->rbuff_read == 0) {
-        newbuff = (uint8_t *)PyMem_RawRealloc(conn->rbuff, (newsize + 1) * sizeof(uint8_t));
-        if (!newbuff) {
-            return -1;
-        }
-    } else {
-        newbuff = PyMem_RawCalloc(newsize + 1, sizeof(uint8_t));
-        if (!newbuff) {
-            return -1;
-        }
-        memcpy(newbuff, conn->rbuff + conn->rbuff_read, conn->rbuff_size - conn->rbuff_read);
-        PyMem_RawFree(conn->rbuff);
-    }
-
-    conn->rbuff = newbuff;
-    conn->rbuff_size -= conn->rbuff_read;
-    conn->rbuff_read = 0;
-    conn->rbuff_max = newsize;
-
-    return 0;
-
-}
-
-int32_t conn_wbuff_resize(struct conn_t *conn, uint32_t newsize) {
-
-    uint8_t *newbuff;
-
-    if (newsize == 0) {
-        return -1;
-    }
-
-    if (conn->wbuff_sent == 0) {
-        newbuff = (uint8_t *)PyMem_RawRealloc(conn->wbuff, (newsize + 1) * sizeof(uint8_t));
-        if (!newbuff) {
-            return -1;
-        }
-    } else {
-        newbuff = PyMem_RawCalloc(newsize + 1, sizeof(uint8_t));
-        if (!newbuff) {
-            return -1;
-        }
-        memcpy(newbuff, conn->wbuff + conn->wbuff_sent, conn->wbuff_size - conn->wbuff_sent);
-        PyMem_RawFree(conn->wbuff);
-    }
-
-    conn->wbuff = newbuff;
-    conn->wbuff_size -= conn->wbuff_sent;
-    conn->wbuff_sent = 0;
-    conn->wbuff_max = newsize;
-
-    return 0;
-
-}
-
-int32_t conn_rbuff_flush(struct conn_t *conn) {
-
-    // remove the request from the buffer
-    size_t remain = conn->rbuff_size - conn->rbuff_read;
-    size_t newsize;
-    if (remain) {
-        newsize = CEIL(remain + 1, 4096);
-    } else {
-        newsize = 4096;
-    }
-    uint8_t *newbuff = PyMem_RawCalloc(newsize + 1, sizeof(uint8_t));
-    if (!newbuff) {
-        log_error("conn_rbuff_flush(): failed to flush rbuff");
-        return -1;
-    }
-    if (remain) {
-        memcpy(newbuff, conn->rbuff + conn->rbuff_read, remain);
-    }
-    PyMem_RawFree(conn->rbuff);
-    conn->rbuff = newbuff;
-    conn->rbuff_size = remain;
-    conn->rbuff_read = 0;
-    conn->rbuff_max = newsize;
-
-    conn->rbuff_size = remain;
-
-    #if _FOO_KV_DEBUG == 1
-    log_debug("conn_rbuff_flush(): successfully flushed rbuff");
-    #endif
-
-    return 0;
-
-}
-
-int32_t conn_write_response(struct conn_t *conn, const struct response_t *response) {
-    // we should never get here if in state STATE_RES_WAITING
-    // therefore wbuff should always be flushed
-
-    // payload
-    int32_t payloadlen = (response->payload) ? PyBytes_GET_SIZE(response->payload) : 0;
-    // 2 for status + rest for data
-    uint32_t msglen = sizeof(uint16_t) + payloadlen;
-    // additional 2 for initial len
-    uint32_t required_wbuff_size = sizeof(uint16_t) + msglen;
-
-    // resize if necessary
-    if (required_wbuff_size > conn->wbuff_max) {
-        uint32_t newsize = CEIL(required_wbuff_size + 1, 1024);
-        if (newsize > MAX_MSG_SIZE) {
-            log_error("conn_write_response(): got response larger than max allowed size");
-            return -1;
-        }
-        if (conn_wbuff_resize(conn, newsize) < 0) {
-            return -1;
-        }
-    }
-
-    #if _FOO_KV_DEBUG == 1
-    char debug_buff[256];
-    sprintf(debug_buff, "conn_write_response(): got response with status: %hd", response->status);
-    log_debug(debug_buff);
-    if (response->payload) {
-        sprintf(debug_buff, "conn_write_response(): got response with data: %s", PyBytes_AS_STRING(response->payload));
-        log_debug(debug_buff);
-    }
-    #endif
-
-    uint16_t wmsglen = msglen;
-
-    // write the response len
-    memcpy(conn->wbuff, &wmsglen, sizeof(uint16_t));
-    // write the response status
-    memcpy(conn->wbuff + sizeof(uint16_t), &response->status, sizeof(int16_t));
-    // write the data
-    if (response->payload) {
-        memcpy(conn->wbuff + sizeof(uint16_t) * 2, PyBytes_AS_STRING(response->payload), payloadlen);
-        Py_DECREF(response->payload);
-    }
-    // update `wbuff_size`
-    conn->wbuff_size = required_wbuff_size;
-
-    return 0;
-
 }
 
 // helper for cached python
@@ -680,6 +502,45 @@ int32_t ensure_py_deps() {
         return -1;
     }
 
+    _datetime_module = PyImport_ImportModule("datetime");
+    if (_datetime_module == NULL) {
+        return -1;
+    }
+
+    _datetime_class = PyObject_GetAttrString(_datetime_module, "datetime");
+    if (_datetime_class == NULL) {
+        return -1;
+    }
+
+    _datetime_formatstring = PyUnicode_FromString("%Y-%m-%d %H:%M:%S %z");
+    if (_datetime_formatstring == NULL) {
+        return -1;
+    }
+
+    _datetime_symbol = PyBytes_FromFormat("%c", DATETIME_SYMBOL);
+    if (_datetime_symbol == NULL) {
+        return -1;
+    }
+
+    if (PyDict_SetItem(_type_to_symbol, _datetime_class, _datetime_symbol) < 0) {
+        return -1;
+    }
+
+    _strptime_str = PyUnicode_FromString("strptime");
+    if (_strptime_str == NULL) {
+        return -1;
+    }
+
+    _strftime_str = PyUnicode_FromString("strftime");
+    if (_strftime_str == NULL) {
+        return -1;
+    }
+
+    _timestamp_str = PyUnicode_FromString("timestamp");
+    if (_timestamp_str == NULL) {
+        return -1;
+    }
+
     is_py_deps_init = 1;
 
     return 0;
@@ -883,6 +744,11 @@ struct cond_t *cond_new() {
 
 }
 
+void cond_destroy(struct cond_t *cond) {
+    pthread_mutex_destroy(&cond->mutex);
+    pthread_cond_destroy(&cond->cond);
+}
+
 int32_t cond_wait(struct cond_t *cond) {
 
     int32_t has_lock;
@@ -892,10 +758,10 @@ int32_t cond_wait(struct cond_t *cond) {
     Py_END_ALLOW_THREADS
 
     if (has_lock) {
-        if (errno == EDEADLK) {
+        if (has_lock == EDEADLK) {
             log_error("cond_wait(): failed to acquire mutex: thread already owns mutex, will proceed with cond wait");
             // note that we do not return in this case
-        } else if (errno == EINVAL) {
+        } else if (has_lock == EINVAL) {
             log_error("cond_wait(): failed to acquire mutex: mutex does not appear to be valid");
             return -1;
         } else {
@@ -911,7 +777,7 @@ int32_t cond_wait(struct cond_t *cond) {
     Py_END_ALLOW_THREADS
 
     if (has_lock) {
-        if (errno == EINVAL) {
+        if (has_lock == EINVAL) {
             log_error("cond_wait() failed to wait for condition: condition does not appear to be valid");
         } else {
             log_error("cond_wait() failed to wait for condition: unknown reason");
@@ -924,13 +790,13 @@ int32_t cond_wait(struct cond_t *cond) {
     Py_END_ALLOW_THREADS
 
     if (has_lock) {
-        if (errno == EBUSY) {
+        if (has_lock == EBUSY) {
             log_error("cond_wait() failed to unlock mutex: mutex is busy");
-        } else if (errno == EINVAL) {
+        } else if (has_lock == EINVAL) {
             log_error("cond_wait() failed to unlock mutex: mutex does not appear to be initialized");
-        } else if (errno == EDEADLK) {
+        } else if (has_lock == EDEADLK) {
             log_error("cond_wait() failed to unlock mutex: mutex already owns the mutex");
-        } else if (errno == EPERM) {
+        } else if (has_lock == EPERM) {
             log_error("cond_wait() failed to unlock mutex: mutex does not own the mutex");
         } else {
             log_error("cond_wait() failed to unlock mutex: unknown reason");
@@ -941,6 +807,76 @@ int32_t cond_wait(struct cond_t *cond) {
     return 0;
 
 }
+
+// The following function has different return values than the above
+// The following returns 1 if a signal was retrieved, 0 if timeout expired, -1 on error
+int32_t cond_timedwait(struct cond_t *cond, struct timespec *ttl) {
+
+    int32_t has_lock, rv, result;
+
+    Py_BEGIN_ALLOW_THREADS
+    rv = pthread_mutex_lock(&cond->mutex);
+    Py_END_ALLOW_THREADS
+
+    if (rv) {
+        if (rv == EDEADLK) {
+            log_error("cond_timedwait(): failed to acquire mutex: thread already owns mutex, will proceed with cond wait");
+            // note that we do not return in this case
+        } else if (rv == EINVAL) {
+            log_error("cond_timedwait(): failed to acquire mutex: mutex does not appear to be valid");
+            return -1;
+        } else {
+            log_error("cond_timedwait(): failed to acquire mutex: unknown reason");
+            return -1;
+        }
+    }
+
+    // this call will unlock the mutex, wait for the cond, and then re-lock the mutex
+    // therefore we need to unlock the mutex again
+    Py_BEGIN_ALLOW_THREADS
+    has_lock = pthread_cond_timedwait(&cond->cond, &cond->mutex, ttl);
+    Py_END_ALLOW_THREADS
+
+    if (has_lock) {
+        if (has_lock == ETIMEDOUT) {
+            #if _FOO_KV_DEBUG == 1
+            log_debug("cond_timedwait(): condition timed out: perhaps this is expected");
+            #endif
+            result = 0;
+        } else if (has_lock == EINVAL) {
+            log_error("cond_timedwait() failed to wait for condition: condition does not appear to be valid");
+            return -1;
+        } else {
+            log_error("cond_timedwait() failed to wait for condition: unknown reason");
+            return -1;
+        }
+    } else {
+        result = 1;
+    }
+
+    Py_BEGIN_ALLOW_THREADS
+    rv = pthread_mutex_unlock(&cond->mutex);
+    Py_END_ALLOW_THREADS
+
+    if (rv) {
+        if (rv == EBUSY) {
+            log_error("cond_timedwait() failed to unlock mutex: mutex is busy");
+        } else if (rv == EINVAL) {
+            log_error("cond_timedwait() failed to unlock mutex: mutex does not appear to be initialized");
+        } else if (rv == EDEADLK) {
+            log_error("cond_timedwait() failed to unlock mutex: mutex already owns the mutex");
+        } else if (rv == EPERM) {
+            log_error("cond_timedwait() failed to unlock mutex: mutex does not own the mutex");
+        } else {
+            log_error("cond_timedwait() failed to unlock mutex: unknown reason");
+        }
+        return -1;
+    }
+
+    return result;
+
+}
+
 
 int32_t cond_notify(struct cond_t *cond) {
 

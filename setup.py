@@ -15,7 +15,9 @@ setuptools.setup(
             "five_one_one_kv.c",
             [
                 "server/util.c",
-                "server/server.c",
+                "server/connection.c",
+                "server/ttl.c",
+                "server/connection_io.c",
                 "server/dispatch.c",
                 "server/module.c",
             ],
