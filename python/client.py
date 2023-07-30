@@ -189,29 +189,29 @@ class Client:
             if data:
                 return loads(data)
             return None
-        if suppress_errors:
-            try:
-                raise _code_to_exc[status]
-            except suppress_errors:
-                return None
-        raise _code_to_exc[status]
+        exc = _code_to_exc[status]
+        if suppress_errors and type(exc) in suppress_errors:
+            return None
+        elif isinstance(exc, KeyError):
+            exc = KeyError(f"key {key} was not found")
+        raise exc
 
     def get(self, key: Any) -> bytes:
-        key = dumps_hashable(key)
-        return self._submit(key, _pack(b"get", key), suppress_errors=(KeyError,))
+        dumped_key = dumps_hashable(key)
+        return self._submit(key, _pack(b"get", dumped_key), suppress_errors=(KeyError,))
 
     def __getitem__(self, key: Any) -> Any:
-        key = dumps_hashable(key)
-        return self._submit(key, _pack(b"get", key))
+        dumped_key = dumps_hashable(key)
+        return self._submit(key, _pack(b"get", dumped_key))
 
     def __setitem__(self, key: Any, val: Any) -> None:
         """
         Sends a request to the server to set `key` to `val`, potentially
         overwriting existing data at `key`.
         """
-        key = dumps_hashable(key)
+        dumped_key = dumps_hashable(key)
         val = dumps(val)
-        return self._submit(key, _pack(b"put", key, val))
+        return self._submit(key, _pack(b"put", dumped_key, val))
 
     def set(
         self, key: Any, val: Any, ttl: Union[datetime, timedelta, int, None] = None
@@ -229,34 +229,41 @@ class Client:
                 deleted after this amount of time. If an int is given, it will
                 be deleted after this many seconds.
         """
-        key = dumps_hashable(key)
+        dumped_key = dumps_hashable(key)
         val = dumps(val)
         if ttl is not None:
             ttl = _convert_ttl(ttl)
-            return self._submit(key, _pack(b"put", key, val, ttl))
-        return self._submit(key, _pack(b"put", key, val))
+            return self._submit(key, _pack(b"put", dumped_key, val, ttl))
+        return self._submit(key, _pack(b"put", dumped_key, val))
 
     def __delitem__(self, key: Any) -> None:
-        key = dumps_hashable(key)
-        self._submit(key, _pack(b"del", key))
+        dumped_key = dumps_hashable(key)
+        self._submit(key, _pack(b"del", dumped_key))
 
     def queue(
         self, key: Any, ttl: Union[datetime, timedelta, int, None] = None
     ) -> None:
-        key = dumps_hashable(key)
+        dumped_key = dumps_hashable(key)
         if ttl is not None:
             ttl = _convert_ttl(ttl)
-            return self._submit(key, _pack(b"queue", key, ttl))
-        return self._submit(key, _pack(b"queue", key))
+            return self._submit(key, _pack(b"queue", dumped_key, ttl))
+        return self._submit(key, _pack(b"queue", dumped_key))
 
     def push(self, key: Any, val: Any) -> None:
-        key = dumps_hashable(key)
+        dumped_key = dumps_hashable(key)
         val = dumps(val)
-        return self._submit(key, _pack(b"push", key, val))
+        return self._submit(key, _pack(b"push", dumped_key, val))
 
     def pop(self, key: Any) -> Any:
-        key = dumps_hashable(key)
-        return self._submit(key, _pack(b"pop", key))
+        dumped_key = dumps_hashable(key)
+        return self._submit(key, _pack(b"pop", dumped_key))
+
+    def ttl(self, key: Any, ttl: Union[datetime, timedelta, int, None] = None) -> None:
+        dumped_key = dumps_hashable(key)
+        if ttl is not None:
+            ttl = _convert_ttl(ttl)
+            return self._submit(key, _pack(b"ttl", dumped_key, ttl))
+        return self._submit(key, _pack(b"ttl", dumped_key))
 
     def _looped_recv(self):
         response = b""

@@ -128,6 +128,9 @@ int32_t dispatch(foo_kv_server *server, int32_t connid, const uint8_t *buff, int
         case CMD_POP:
             err = do_pop(server, subcmds + 1, subcmd_to_len + 1, nstrs - 1, response);
             break;
+        case CMD_TTL:
+            err = do_ttl(server, subcmds + 1, subcmd_to_len + 1, nstrs - 1, response);
+            break;
         default:
             log_error("dispatch(): got unrecognized command");
             response->status = RES_BAD_CMD;
@@ -698,6 +701,67 @@ DO_POP_END:
 
     return 0;
 }
+
+int32_t do_ttl(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response) {
+
+    #if _FOO_KV_DEBUG == 1
+    log_debug("do_ttl(): got request");
+    #endif
+
+    if (nargs < 1 || nargs > 2) {
+        response->status = RES_BAD_ARGS;
+        return 0;
+    }
+
+    PyObject *loaded_key = _loads_hashable((char *)args[0], arg_to_len[0]);
+    if (!loaded_key) {
+        error_handler(response);
+        return 0;
+    }
+
+    #if _FOO_KV_DEBUG == 1
+    log_debug("do_ttl(): loaded key");
+    #endif
+
+    int32_t is_contained = PyDict_Contains(server->storage, loaded_key);
+    if (is_contained < 0) {
+        log_error("do_ttl(): could not determine if key exists");
+        response->status = RES_ERR_SERVER;
+        return 0;
+    }
+    if (is_contained == 0) {
+        log_error("do_ttl(): key is not contained, cannot set ttl.");
+        response->status = RES_BAD_KEY;
+        return 0;
+    }
+
+    if (nargs == 2) {
+        PyObject *loaded_ttl = _loads_foo_datetime((char *)args[1], arg_to_len[1]);
+        if (!loaded_ttl) {
+            error_handler(response);
+            return 0;
+        }
+        #if _FOO_KV_DEBUG == 1
+        log_debug("do_ttl(): loaded ttl");
+        #endif
+        if (foo_kv_ttl_heap_put_dt(server->storage_ttl_heap, loaded_key, loaded_ttl)) {
+            log_error("do_ttl(): unable to set ttl on item, exiting!");
+            response->status = RES_ERR_SERVER;
+            return 0;
+        }
+    } else {
+        if (foo_kv_ttl_heap_invalidate(server->storage_ttl_heap, loaded_key)) {
+            log_error("do_ttl(): unable to invalidate previous ttl, exiting");
+            response->status = RES_ERR_SERVER;
+            return 0;
+        }
+    }
+
+    response->status = RES_OK;
+    return 0;
+
+}
+
 
 
 

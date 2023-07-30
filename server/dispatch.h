@@ -15,6 +15,7 @@
 #define CMD_QUEUE -52164368
 #define CMD_PUSH 1069254648
 #define CMD_POP 638676238
+#define CMD_TTL 320309783
 
 
 extern int16_t _dispatch_errno;
@@ -28,6 +29,7 @@ int32_t do_del(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_
 int32_t do_queue(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response);
 int32_t do_push(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response);
 int32_t do_pop(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response);
+int32_t do_ttl(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_to_len, int32_t nargs, struct response_t *response);
 
 // helper methods
 PyObject *dumps_as_pyobject(PyObject *x);

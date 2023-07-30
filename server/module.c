@@ -843,14 +843,17 @@ static PyObject *foo_kv_server_tp_method_storage_ttl_loop(PyObject *self, PyObje
             continue;
         }
 
-        if (PyDict_DelItem(kv_self->storage, expired_key)) {
+        int32_t del_result = _pyobject_safe_delitem(kv_self->storage, expired_key);
+        if (del_result < 0) {
+            log_error("storage_ttl_loop(): delete operation failed!");
+            // not sure what would be the best mitigation here?
+            return NULL;
+        }
+        if (del_result == 0) {
             #if _FOO_KV_DEBUG == 1
             log_debug("storage_ttl_loop(): expired key was not found in storage, unable to expire, perhaps this is expected");
             #endif
-            if (PyErr_Occurred()) {
-                PyErr_Clear();
-            }
-            continue;
+            // just log, still need to execute the following `sem_post` statement
         }
 
         if (sem_post(kv_self->storage_lock)) {

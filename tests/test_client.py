@@ -97,13 +97,11 @@ def test_many(client):
         elif op == "get":
             assert control.get(k) == client.get(k)
         elif op == "del":
-            try:
+            if k in control:
                 del control[k]
-            except KeyError:
+                del client[k]
+            else:
                 with pytest.raises(KeyError):
                     del client[k]
-            else:
-                del client[k]
-
     for k in control.keys():
         del client[k]

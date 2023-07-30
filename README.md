@@ -16,6 +16,9 @@ Run the server with:
 python -m five_one_one_kv.server
 ```
 
+(The server supports `-v` for minimal logging and `-vv` for verbose logging, but keep in mind
+that the server.log file will grow in size quite rapidly with `-vv`)
+
 With the server running, run the test suite with:
 ```
 make test

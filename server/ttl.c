@@ -452,6 +452,8 @@ PyObject *foo_kv_ttl_heap_get(foo_kv_ttl_heap *self) {
     Py_BEGIN_ALLOW_THREADS
     sem_wait(self->lock);
     Py_END_ALLOW_THREADS
+    // it's possible that the item at the front of the heap is different from the one we got from `peek` earlier
+    // In this case we'll address this the next iteration of the loop, it's not a big deal
     next_ttl = ttl_heap_get(self->heap);
     #if _FOO_KV_DEBUG == 1
     if (!_ttl_heap_is_valid(self->heap)) {
@@ -460,13 +462,18 @@ PyObject *foo_kv_ttl_heap_get(foo_kv_ttl_heap *self) {
     #endif
     // PyDict_DelItem sometimes segfaults if it looks for a key that is not in the dict
     // But we have a serious problem anyway if the key is not present
-    if (PyDict_DelItem(self->key_to_ttl, next_ttl->key) < 0) {
+    int32_t del_result = _pyobject_safe_delitem(self->key_to_ttl, next_ttl->key);
+    if (del_result < 0) {
         #if _FOO_KV_DEBUG == 1
-        log_debug("ttl_heap_get(): unable to remove ttl from key_to_ttl!");
+        log_error("ttl_heap_get(): unable to remove ttl from key_to_ttl!");
         #endif
         if (PyErr_Occurred()) {
             PyErr_Clear();
         }
+    } else if (del_result == 0) {
+        #if _FOO_KV_DEBUG == 1
+        log_debug("ttl_heap_get(): expired ttl was not in key_to_ttl, perhaps this is expected.");
+        #endif
     }
 
     #if _FOO_KV_DEBUG == 1
