@@ -224,10 +224,6 @@ int32_t ensure_py_deps() {
     if (_builtins == NULL) {
         return -1;
     }
-    _type_f = PyDict_GetItemString(_builtins, "type");
-    if (_type_f == NULL) {
-        return -1;
-    }
     _asyncio_module = PyImport_ImportModule("asyncio");
     if (_asyncio_module == NULL) {
         return -1;
@@ -443,7 +439,7 @@ int32_t ensure_py_deps() {
     Py_DECREF(_list_class);
     Py_DECREF(_list_symbol);
 
-    _tuple_symbol = PyBytes_FromFormat("%c", LIST_SYMBOL);
+    _tuple_symbol = PyBytes_FromFormat("%c", TUPLE_SYMBOL);
     if (_tuple_symbol == NULL) {
         return -1;
     }

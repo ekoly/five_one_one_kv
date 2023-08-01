@@ -81,8 +81,8 @@ def test_ttl_many_extend_ttl():
         for k, v in zip(keys, values):
             client.set(k, v, ttl_secs)
         # loop because we want to extend the ttls a few times over
-        for ix in range(3):
-            time.sleep(float(ttl_secs) / 2)
+        for ix in range(5):
+            time.sleep(ttl_secs - 2)
             for k, v in zip(keys, values):
                 if client.get(k) != v:
                     client.close()

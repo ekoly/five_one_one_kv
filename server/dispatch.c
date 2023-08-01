@@ -768,9 +768,7 @@ int32_t do_ttl(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_
 // helper methods
 PyObject *dumps_as_pyobject(PyObject *x) {
 
-    Py_INCREF(_type_f);
-    PyObject *x_type = PyObject_CallOneArg(_type_f, x);
-    Py_DECREF(_type_f);
+    PyObject *x_type = PyObject_Type(x);
     if (!x_type) {
         return NULL;
     }
@@ -795,6 +793,8 @@ PyObject *dumps_as_pyobject(PyObject *x) {
             return PyBytes_FromFormat("%c%s", BYTES_SYMBOL, PyBytes_AS_STRING(x));
         case LIST_SYMBOL:
             return _dumps_list(x);
+        case TUPLE_SYMBOL:
+            return _dumps_tuple(x);
         case BOOL_SYMBOL:
             if (Py_IsTrue(x)) {
                 return PyBytes_FromFormat("%c%c", s, '1');
@@ -827,29 +827,45 @@ const char *dumps(PyObject *x) {
 }
 
 PyObject *_dumps_long(PyObject *x) {
-    long l = PyLong_AsLong(x);
+    PyObject *xs = PyObject_Str(x);
     if (PyErr_Occurred()) {
         PyErr_Clear();
         return NULL;
     }
-    return PyBytes_FromFormat("%c%ld", INT_SYMBOL, l);
+    PyObject *xb = PyUnicode_AsASCIIString(xs);
+    if (PyErr_Occurred()) {
+        PyErr_Clear();
+        return NULL;
+    }
+    PyObject *result = PyBytes_FromFormat("%c%s", INT_SYMBOL, PyBytes_AS_STRING(xb));
+    if (PyErr_Occurred()) {
+        PyErr_Clear();
+        return NULL;
+    }
+    Py_DECREF(xs);
+    Py_DECREF(xb);
+    return result;
 }
 
 PyObject *_dumps_float(PyObject *x) {
-    // d for double
-    PyObject *d = PyObject_CallOneArg(_string_class, x);
-    if (!d) {
+    PyObject *xs = PyObject_Str(x);
+    if (PyErr_Occurred()) {
+        PyErr_Clear();
         return NULL;
     }
-    // db for double as bytes
-    PyObject *db = PyUnicode_AsASCIIString(d);
-    Py_DECREF(d);
-    if (!db) {
+    PyObject *xb = PyUnicode_AsASCIIString(xs);
+    if (PyErr_Occurred()) {
+        PyErr_Clear();
         return NULL;
     }
-    PyObject *res = PyBytes_FromFormat("%c%s", FLOAT_SYMBOL, PyBytes_AS_STRING(db));
-    Py_DECREF(db);
-    return res;
+    PyObject *result = PyBytes_FromFormat("%c%s", FLOAT_SYMBOL, PyBytes_AS_STRING(xb));
+    if (PyErr_Occurred()) {
+        PyErr_Clear();
+        return NULL;
+    }
+    Py_DECREF(xs);
+    Py_DECREF(xb);
+    return result;
 }
 
 PyObject *_dumps_unicode(PyObject *x) {
@@ -926,6 +942,134 @@ PyObject *_dumps_list(PyObject *x) {
 
 }
 
+PyObject *_dumps_tuple(PyObject *x) {
+    uint16_t size = PyTuple_GET_SIZE(x);
+    char symbol = TUPLE_SYMBOL;
+    PyObject *intermediate = PyList_New(size);
+    if (!intermediate) {
+        return NULL;
+    }
+    #if _FOO_KV_DEBUG == 1
+    char debug_buff[256];
+    #endif
+    // char for type declaration, int16 for the number of items
+    int32_t buffer_len = sizeof(char) + sizeof(uint16_t);
+    for (Py_ssize_t ix = 0; ix < size; ix++) {
+        PyObject *dumped_item = _dumps_collectable_as_pyobject(PyTuple_GET_ITEM(x, ix));
+        if (!dumped_item) {
+            Py_DECREF(intermediate);
+            return NULL;
+        }
+        PyList_SET_ITEM(intermediate, ix, dumped_item);
+        buffer_len += sizeof(uint16_t) + PyBytes_GET_SIZE(dumped_item);
+    }
+    char buffer[buffer_len];
+    int32_t offset = 0;
+    memcpy(buffer + offset, &symbol, sizeof(char));
+    offset += sizeof(char);
+    memcpy(buffer + offset, &size, sizeof(uint16_t));
+    offset += sizeof(uint16_t);
+    for (Py_ssize_t ix = 0; ix < size; ix++) {
+        #if _FOO_KV_DEBUG == 1
+        sprintf(debug_buff, "_dumps_tuple(): offset: %d", offset);
+        log_debug(debug_buff);
+        #endif
+        PyObject *item = PyList_GET_ITEM(intermediate, ix);
+        uint16_t slen = PyBytes_GET_SIZE(item);
+        #if _FOO_KV_DEBUG == 1
+        sprintf(debug_buff, "_dumps_tuple(): len(items[%ld])=%hu", ix, slen);
+        log_debug(debug_buff);
+        sprintf(debug_buff, "_dumps_tuple(): items[%ld]=%.*s", ix, slen, PyBytes_AS_STRING(item));
+        log_debug(debug_buff);
+        #endif
+        memcpy(buffer + offset, &slen, sizeof(uint16_t));
+        offset += sizeof(uint16_t);
+        memcpy(buffer + offset, PyBytes_AS_STRING(item), slen);
+        offset += slen;
+    }
+
+    if (offset != buffer_len) {
+        #if _FOO_KV_DEBUG == 1
+        if (offset > buffer_len) {
+            log_error("_dumps_tuple(): offset overshot expected buffer_len");
+        } else {
+            log_error("_dumps_tuple(): offset undershot expected buffer_len");
+        }
+        #endif
+        _dispatch_errno = RES_ERR_SERVER;
+        return NULL;
+    }
+
+    Py_DECREF(intermediate);
+
+    return PyBytes_FromStringAndSize(buffer, buffer_len);
+
+}
+
+PyObject *_dumps_hashable_tuple(PyObject *x) {
+    uint16_t size = PyTuple_GET_SIZE(x);
+    char symbol = TUPLE_SYMBOL;
+    PyObject *intermediate = PyList_New(size);
+    if (!intermediate) {
+        return NULL;
+    }
+    #if _FOO_KV_DEBUG == 1
+    char debug_buff[256];
+    #endif
+    // char for type declaration, int16 for the number of items
+    int32_t buffer_len = sizeof(char) + sizeof(uint16_t);
+    for (Py_ssize_t ix = 0; ix < size; ix++) {
+        PyObject *dumped_item = _dumps_hashable_as_pyobject(PyTuple_GET_ITEM(x, ix));
+        if (!dumped_item) {
+            Py_DECREF(intermediate);
+            return NULL;
+        }
+        PyList_SET_ITEM(intermediate, ix, dumped_item);
+        buffer_len += sizeof(uint16_t) + PyBytes_GET_SIZE(dumped_item);
+    }
+    char buffer[buffer_len];
+    int32_t offset = 0;
+    memcpy(buffer + offset, &symbol, sizeof(char));
+    offset += sizeof(char);
+    memcpy(buffer + offset, &size, sizeof(uint16_t));
+    offset += sizeof(uint16_t);
+    for (Py_ssize_t ix = 0; ix < size; ix++) {
+        #if _FOO_KV_DEBUG == 1
+        sprintf(debug_buff, "_dumps_hashable_tuple(): offset: %d", offset);
+        log_debug(debug_buff);
+        #endif
+        PyObject *item = PyList_GET_ITEM(intermediate, ix);
+        uint16_t slen = PyBytes_GET_SIZE(item);
+        #if _FOO_KV_DEBUG == 1
+        sprintf(debug_buff, "_dumps_hashable_tuple(): len(items[%ld])=%hu", ix, slen);
+        log_debug(debug_buff);
+        sprintf(debug_buff, "_dumps_hashable_tuple(): items[%ld]=%.*s", ix, slen, PyBytes_AS_STRING(item));
+        log_debug(debug_buff);
+        #endif
+        memcpy(buffer + offset, &slen, sizeof(uint16_t));
+        offset += sizeof(uint16_t);
+        memcpy(buffer + offset, PyBytes_AS_STRING(item), slen);
+        offset += slen;
+    }
+
+    if (offset != buffer_len) {
+        #if _FOO_KV_DEBUG == 1
+        if (offset > buffer_len) {
+            log_error("_dumps_hashable_tuple(): offset overshot expected buffer_len");
+        } else {
+            log_error("_dumps_hashable_tuple(): offset undershot expected buffer_len");
+        }
+        #endif
+        _dispatch_errno = RES_ERR_SERVER;
+        return NULL;
+    }
+
+    Py_DECREF(intermediate);
+
+    return PyBytes_FromStringAndSize(buffer, buffer_len);
+
+}
+
 PyObject *_dumps_datetime(PyObject *x) {
 
     PyObject *dts = PyObject_CallMethodOneArg(x, _strftime_str, _datetime_formatstring);
@@ -963,7 +1107,7 @@ PyObject *_dumps_datetime(PyObject *x) {
 
 PyObject *_dumps_hashable_as_pyobject(PyObject *x) {
 
-    PyObject *x_type = PyObject_CallOneArg(_type_f, x);
+    PyObject *x_type = PyObject_Type(x);
     if (!x_type) {
         _dispatch_errno = RES_BAD_TYPE;
         return NULL;
@@ -986,6 +1130,8 @@ PyObject *_dumps_hashable_as_pyobject(PyObject *x) {
             return _dumps_unicode(x);
         case BYTES_SYMBOL:
             return PyBytes_FromFormat("%c%s", BYTES_SYMBOL, PyBytes_AS_STRING(x));
+        case TUPLE_SYMBOL:
+            return _dumps_hashable_tuple(x);
         case LIST_SYMBOL:
         case BOOL_SYMBOL:
         case DATETIME_SYMBOL:
@@ -1003,7 +1149,7 @@ PyObject *_dumps_hashable_as_pyobject(PyObject *x) {
 
 PyObject *_dumps_collectable_as_pyobject(PyObject *x) {
 
-    PyObject *x_type = PyObject_CallOneArg(_type_f, x);
+    PyObject *x_type = PyObject_Type(x);
     if (!x_type) {
         return NULL;
     }
@@ -1024,6 +1170,8 @@ PyObject *_dumps_collectable_as_pyobject(PyObject *x) {
             return _dumps_unicode(x);
         case BYTES_SYMBOL:
             return PyBytes_FromFormat("%c%s", s, PyBytes_AS_STRING(x));
+        case TUPLE_SYMBOL:
+            return _dumps_tuple(x);
         case LIST_SYMBOL:
             _dispatch_errno = RES_BAD_COLLECTION;
             return NULL;
@@ -1086,6 +1234,8 @@ PyObject *loads(const char *x, int32_t len) {
             return _loads_bool(x + 1, len - 1);
         case DATETIME_SYMBOL:
             return _loads_datetime(x + 1, len - 1);
+        case TUPLE_SYMBOL:
+            return _loads_tuple(x + 1, len - 1);
         default:
             _dispatch_errno = RES_BAD_TYPE;
             return NULL;
@@ -1175,8 +1325,8 @@ PyObject *_loads_list(const char *x, int32_t len) {
         // establish str len
         uint16_t slen;
         memcpy(&slen, x + offset, sizeof(uint16_t));
-        if (slen < 0) {
-            log_error("_loads_list(): got request item with negative len");
+        if (slen < sizeof(char)) {
+            log_error("_loads_list(): got request item with not enough size for type indicator");
             _dispatch_errno = RES_ERR_CLIENT;
             return NULL;
         }
@@ -1206,9 +1356,9 @@ PyObject *_loads_list(const char *x, int32_t len) {
 
     if (offset != len) {
         if (offset > len) {
-            log_error("dispatch(): got malformed request: offset overshot len");
+            log_error("_loads_list(): got malformed request: offset overshot len");
         } else {
-            log_error("dispatch(): got malformed request: offset undershot len");
+            log_error("_loads_list(): got malformed request: offset undershot len");
         }
         _dispatch_errno = RES_ERR_CLIENT;
         return NULL;
@@ -1225,34 +1375,188 @@ PyObject *_loads_list(const char *x, int32_t len) {
     }
     return result;
 
-    /*
-    PyObject *xs = PyUnicode_FromStringAndSize(x, len);
-    PyObject *intermediate = PyObject_CallOneArg(_json_loads_f, xs);
-    Py_DECREF(xs);
-    if (!intermediate) {
-        return NULL;
-    }
-    if (!PyList_Check(intermediate)) {
+}
+
+PyObject *_loads_tuple(const char *x, int32_t len) {
+
+    if ((uint16_t)len < sizeof(uint16_t)) {
         _dispatch_errno = RES_BAD_TYPE;
         return NULL;
     }
-    Py_ssize_t size = PyList_GET_SIZE(intermediate);
-    PyObject *res = PyList_New(size);
-    for (Py_ssize_t ix = 0; ix < size; ix++) {
-        PyObject *item_bytes = PyUnicode_AsUTF8String(PyList_GET_ITEM(intermediate, ix));
-        if (!item_bytes) {
+
+    uint16_t nstrs;
+    memcpy(&nstrs, x, sizeof(uint16_t));
+
+    #if _FOO_KV_DEBUG == 1
+    char debug_buffer[256];
+    sprintf(debug_buffer, "_loads_tuple(): nstrs=%hu, len=%d", nstrs, len);
+    log_debug(debug_buffer);
+    #endif
+
+    const char *items[nstrs];
+    uint16_t item_to_len[nstrs];
+    uint16_t offset = sizeof(uint16_t);
+
+    for (int32_t ix = 0; ix < nstrs; ix++) {
+        #if _FOO_KV_DEBUG == 1
+        sprintf(debug_buffer, "_loads_tuple(): offset=%hu", offset);
+        log_debug(debug_buffer);
+        #endif
+        // sanity
+        if (offset >= len) {
+            log_error("_loads_tuple(): got misformed request.");
+            _dispatch_errno = RES_ERR_CLIENT;
             return NULL;
         }
-        PyObject *loaded_item = _loads_collectable_from_pyobject(item_bytes);
-        Py_DECREF(item_bytes);
-        if (!loaded_item) {
+        // establish str len
+        uint16_t slen;
+        memcpy(&slen, x + offset, sizeof(uint16_t));
+        if (slen < sizeof(char)) {
+            log_error("_loads_tuple(): got request item with not enough size for type indicator");
+            _dispatch_errno = RES_ERR_CLIENT;
             return NULL;
         }
-        PyList_SET_ITEM(res, ix, loaded_item);
+        item_to_len[ix] = slen;
+
+        #if _FOO_KV_DEBUG == 1
+        sprintf(debug_buffer, "_loads_tuple(): item_to_len[%d]=%d", (int)ix, slen);
+        log_debug(debug_buffer);
+        #endif
+
+        // establish subcmd
+        offset += sizeof(uint16_t);
+        items[ix] = x + offset;
+
+        offset += slen;
+
+        #if _FOO_KV_DEBUG == 1
+        if (slen < 200) {
+            sprintf(debug_buffer, "_loads_tuple(): items[%d]=%.*s", (int)ix, slen, items[ix]);
+            log_debug(debug_buffer);
+        } else {
+            log_debug("_loads_tuple(): subcmd too long for log");
+        }
+        #endif
+
     }
-    Py_DECREF(intermediate);
-    return res;
-    */
+
+    if (offset != len) {
+        if (offset > len) {
+            log_error("_loads_tuple(): got malformed request: offset overshot len");
+        } else {
+            log_error("_loads_tuple(): got malformed request: offset undershot len");
+        }
+        _dispatch_errno = RES_ERR_CLIENT;
+        return NULL;
+    }
+
+    PyObject *result = PyTuple_New(nstrs);
+    for (Py_ssize_t ix = 0; ix < nstrs; ix++) {
+        PyObject *loaded_item = _loads_collectable(items[ix], item_to_len[ix]);
+        if (!loaded_item) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        PyTuple_SET_ITEM(result, ix, loaded_item);
+    }
+    return result;
+
+}
+
+PyObject *_loads_hashable_tuple(const char *x, int32_t len) {
+
+    if ((uint16_t)len < sizeof(uint16_t)) {
+        _dispatch_errno = RES_BAD_TYPE;
+        return NULL;
+    }
+
+    uint16_t nstrs;
+    memcpy(&nstrs, x, sizeof(uint16_t));
+
+    #if _FOO_KV_DEBUG == 1
+    char debug_buffer[256];
+    sprintf(debug_buffer, "_loads_hashable_tuple(): nstrs=%hu, len=%d", nstrs, len);
+    log_debug(debug_buffer);
+    #endif
+
+    const char *items[nstrs];
+    uint16_t item_to_len[nstrs];
+    uint16_t offset = sizeof(uint16_t);
+
+    for (int32_t ix = 0; ix < nstrs; ix++) {
+        #if _FOO_KV_DEBUG == 1
+        sprintf(debug_buffer, "_loads_hashable_tuple(): offset=%hu", offset);
+        log_debug(debug_buffer);
+        #endif
+        // sanity
+        if (offset >= len) {
+            log_error("_loads_hashable_tuple(): got misformed request.");
+            _dispatch_errno = RES_ERR_CLIENT;
+            return NULL;
+        }
+        // establish str len
+        uint16_t slen;
+        memcpy(&slen, x + offset, sizeof(uint16_t));
+        if (slen < sizeof(char)) {
+            log_error("_loads_hashable_tuple(): got request item with not enough size for type indicator");
+            _dispatch_errno = RES_ERR_CLIENT;
+            return NULL;
+        }
+        item_to_len[ix] = slen;
+
+        #if _FOO_KV_DEBUG == 1
+        sprintf(debug_buffer, "_loads_hashable_tuple(): item_to_len[%d]=%d", (int)ix, slen);
+        log_debug(debug_buffer);
+        #endif
+
+        // establish subcmd
+        offset += sizeof(uint16_t);
+        items[ix] = x + offset;
+
+        offset += slen;
+
+        #if _FOO_KV_DEBUG == 1
+        if (slen < 200) {
+            sprintf(debug_buffer, "_loads_hashable_tuple(): items[%d]=%.*s", (int)ix, slen, items[ix]);
+            log_debug(debug_buffer);
+        } else {
+            log_debug("_loads_hashable_tuple(): subcmd too long for log");
+        }
+        #endif
+
+    }
+
+    if (offset != len) {
+        if (offset > len) {
+            log_error("_loads_hashable_tuple(): got malformed request: offset overshot len");
+        } else {
+            log_error("_loads_hashable_tuple(): got malformed request: offset undershot len");
+        }
+        _dispatch_errno = RES_ERR_CLIENT;
+        return NULL;
+    }
+
+    PyObject *result = PyTuple_New(nstrs);
+    for (Py_ssize_t ix = 0; ix < nstrs; ix++) {
+        int32_t is_valid = is_hashable(items[ix], item_to_len[ix]);
+        if (is_valid < 1) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        is_valid = is_collectable(items[ix], item_to_len[ix]);
+        if (is_valid < 1) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        PyObject *loaded_item = _loads_hashable(items[ix], item_to_len[ix]);
+        if (!loaded_item) {
+            Py_DECREF(result);
+            _dispatch_errno = RES_BAD_HASH;
+            return NULL;
+        }
+        PyTuple_SET_ITEM(result, ix, loaded_item);
+    }
+    return result;
 
 }
 
@@ -1312,6 +1616,8 @@ PyObject *_loads_hashable(const char *x, int32_t len) {
             return _loads_unicode(x + 1, len - 1);
         case BYTES_SYMBOL:
             return PyBytes_FromStringAndSize(x + 1, len - 1);
+        case TUPLE_SYMBOL:
+            return _loads_hashable_tuple(x + 1, len - 1);
         case LIST_SYMBOL:
         case BOOL_SYMBOL:
         case DATETIME_SYMBOL:
@@ -1418,5 +1724,69 @@ PyObject *_loads_foo_datetime_from_pyobject(PyObject *x) {
     }
 
     return _loads_datetime(res, len);
+
+}
+
+
+int32_t is_hashable(const char *x, int32_t len) {
+
+    switch (x[0]) {
+        case INT_SYMBOL:
+            return 1;
+        case FLOAT_SYMBOL:
+            return 1;
+        case STRING_SYMBOL:
+            return 1;
+        case BYTES_SYMBOL:
+            return 1;
+        case LIST_SYMBOL:
+            _dispatch_errno = RES_BAD_HASH;
+            return 0;
+        case BOOL_SYMBOL:
+            _dispatch_errno = RES_BAD_HASH;
+            return 0;
+        case DATETIME_SYMBOL:
+            _dispatch_errno = RES_BAD_HASH;
+            return 0;
+        case TUPLE_SYMBOL:
+            return 1;
+        default:
+            _dispatch_errno = RES_BAD_TYPE;
+            return -1;
+    }
+
+    _dispatch_errno = RES_UNKNOWN;
+    return -1;
+
+}
+
+
+int32_t is_collectable(const char *x, int32_t len) {
+
+    switch (x[0]) {
+        case INT_SYMBOL:
+            return 1;
+        case FLOAT_SYMBOL:
+            return 1;
+        case STRING_SYMBOL:
+            return 1;
+        case BYTES_SYMBOL:
+            return 1;
+        case LIST_SYMBOL:
+            _dispatch_errno = RES_BAD_COLLECTION;
+            return 0;
+        case BOOL_SYMBOL:
+            return 1;
+        case DATETIME_SYMBOL:
+            return 1;
+        case TUPLE_SYMBOL:
+            return 1;
+        default:
+            _dispatch_errno = RES_BAD_TYPE;
+            return -1;
+    }
+
+    _dispatch_errno = RES_UNKNOWN;
+    return -1;
 
 }
