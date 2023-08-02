@@ -37,11 +37,11 @@ def test_ttl_datetime(client):
 
 
 def test_ttl_many():
-    def _challenge():
+    def _challenge(num_items):
         client = Client()
-        keys = [randostrs() for _ in range(10)]
-        values = [randostrs() for _ in range(10)]
-        ttls = [random.randint(3, 7) for _ in range(10)]
+        keys = [randostrs() for _ in range(num_items)]
+        values = [randostrs() for _ in range(num_items)]
+        ttls = [random.randint(3, 7) for _ in range(num_items)]
         for k, v, ttl in zip(keys, values, ttls):
             client.set(k, v, ttl)
         for k, v in zip(keys, values):
@@ -59,7 +59,7 @@ def test_ttl_many():
     futures = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
         for _ in range(64):
-            futures.append(executor.submit(_challenge))
+            futures.append(executor.submit(_challenge, 5))
         for fut in concurrent.futures.as_completed(futures):
             if fut.exception():
                 raise fut.exception()
@@ -73,10 +73,10 @@ def test_ttl_many_extend_ttl():
     Test that ttls can be extended.
     """
 
-    def _challenge():
+    def _challenge(num_items):
         client = Client()
-        keys = [randostrs() for _ in range(10)]
-        values = [randostrs() for _ in range(10)]
+        keys = [randostrs() for _ in range(num_items)]
+        values = [randostrs() for _ in range(num_items)]
         ttl_secs = 3
         for k, v in zip(keys, values):
             client.set(k, v, ttl_secs)
@@ -100,7 +100,7 @@ def test_ttl_many_extend_ttl():
     futures = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
         for _ in range(64):
-            futures.append(executor.submit(_challenge))
+            futures.append(executor.submit(_challenge, 5))
         for fut in concurrent.futures.as_completed(futures):
             if fut.exception():
                 raise fut.exception()

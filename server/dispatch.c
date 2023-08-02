@@ -289,6 +289,23 @@ int32_t do_set(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_
     log_debug("do_set(): loaded val");
     #endif
 
+    if (threadsafe_sem_wait(server->storage_lock)) {
+        log_error("do_set(): encountered error trying to acquire storage lock");
+        response->status = RES_ERR_SERVER;
+        return 0;
+    }
+
+    int32_t res = PyDict_SetItem(server->storage, loaded_key, loaded_val);
+
+    Py_DECREF(loaded_key);
+    Py_DECREF(loaded_val);
+
+    if (sem_post(server->storage_lock)) {
+        log_error("do_set(): failed to release lock");
+        response->status = RES_ERR_SERVER;
+        return 0;
+    }
+
     if (nargs == 3) {
         PyObject *loaded_ttl = _loads_foo_datetime((char *)args[2], arg_to_len[2]);
         if (!loaded_ttl) {
@@ -309,23 +326,6 @@ int32_t do_set(foo_kv_server *server, const uint8_t **args, const uint16_t *arg_
             response->status = RES_ERR_SERVER;
             return 0;
         }
-    }
-
-    if (threadsafe_sem_wait(server->storage_lock)) {
-        log_error("do_set(): encountered error trying to acquire storage lock");
-        response->status = RES_ERR_SERVER;
-        return 0;
-    }
-
-    int32_t res = PyDict_SetItem(server->storage, loaded_key, loaded_val);
-
-    Py_DECREF(loaded_key);
-    Py_DECREF(loaded_val);
-
-    if (sem_post(server->storage_lock)) {
-        log_error("do_set(): failed to release lock");
-        response->status = RES_ERR_SERVER;
-        return 0;
     }
 
     if (res) {
@@ -476,6 +476,23 @@ int32_t do_queue(foo_kv_server *server, const uint8_t **args, const uint16_t *ar
     log_debug("do_queue(): loaded val");
     #endif
 
+    if (threadsafe_sem_wait(server->storage_lock)) {
+        log_error("do_queue(): encountered error trying to acquire storage lock");
+        response->status = RES_ERR_SERVER;
+        return 0;
+    }
+
+    int32_t res = PyDict_SetItem(server->storage, loaded_key, deq_obj);
+
+    Py_DECREF(loaded_key);
+    Py_DECREF(deq_obj);
+
+    if (sem_post(server->storage_lock)) {
+        log_error("do_queue(): failed to release lock");
+        response->status = RES_ERR_SERVER;
+        return 0;
+    }
+
     if (nargs == 3) {
         PyObject *loaded_ttl = _loads_foo_datetime((char *)args[2], arg_to_len[2]);
         if (!loaded_ttl) {
@@ -496,23 +513,6 @@ int32_t do_queue(foo_kv_server *server, const uint8_t **args, const uint16_t *ar
             response->status = RES_ERR_SERVER;
             return 0;
         }
-    }
-
-    if (threadsafe_sem_wait(server->storage_lock)) {
-        log_error("do_queue(): encountered error trying to acquire storage lock");
-        response->status = RES_ERR_SERVER;
-        return 0;
-    }
-
-    int32_t res = PyDict_SetItem(server->storage, loaded_key, deq_obj);
-
-    Py_DECREF(loaded_key);
-    Py_DECREF(deq_obj);
-
-    if (sem_post(server->storage_lock)) {
-        log_error("do_queue(): failed to release lock");
-        response->status = RES_ERR_SERVER;
-        return 0;
     }
 
     if (res) {
@@ -1151,11 +1151,13 @@ PyObject *_dumps_collectable_as_pyobject(PyObject *x) {
 
     PyObject *x_type = PyObject_Type(x);
     if (!x_type) {
+        _dispatch_errno = RES_BAD_TYPE;
         return NULL;
     }
     PyObject *symbol = PyDict_GetItem(_type_to_symbol, x_type);
     Py_DECREF(x_type);
     if (!symbol) {
+        _dispatch_errno = RES_BAD_TYPE;
         return NULL;
     }
 
@@ -1219,6 +1221,11 @@ PyObject *loads_from_pyobject(PyObject *x) {
 
 PyObject *loads(const char *x, int32_t len) {
 
+    if ((uint32_t)len < sizeof(char)) {
+        _dispatch_errno = RES_BAD_TYPE;
+        return NULL;
+    }
+
     switch (x[0]) {
         case INT_SYMBOL:
             return _loads_long(x + 1, len - 1);
@@ -1249,28 +1256,43 @@ PyObject *_loads_long(const char *x, int32_t len) {
 
     PyObject *xs = PyUnicode_FromStringAndSize(x, len);
     if (!xs) {
+        _dispatch_errno = RES_BAD_TYPE;
         return NULL;
     }
 
-    return PyLong_FromUnicodeObject(xs, 0);
+    PyObject *rv = PyLong_FromUnicodeObject(xs, 0);
+    Py_DECREF(xs);
+    if (!rv) {
+        _dispatch_errno = RES_BAD_TYPE;
+        return NULL;
+    }
+
+    return rv;
 
 }
 
 PyObject *_loads_float(const char *x, int32_t len) {
     PyObject *intermediate = PyUnicode_FromStringAndSize(x, len);
     if (!intermediate) {
+        _dispatch_errno = RES_BAD_TYPE;
         return NULL;
     }
-    PyObject *res = PyFloat_FromString(intermediate);
+    PyObject *rv = PyFloat_FromString(intermediate);
     Py_DECREF(intermediate);
-    if (!res) {
+    if (!rv) {
+        _dispatch_errno = RES_BAD_TYPE;
         return NULL;
     }
-    return res;
+    return rv;
 }
 
 PyObject *_loads_unicode(const char *x, int32_t len) {
-    return PyUnicode_DecodeUTF8(x, len, "strict");
+    PyObject *rv = PyUnicode_DecodeUTF8(x, len, "strict");
+    if (!rv) {
+        _dispatch_errno = RES_BAD_TYPE;
+        return NULL;
+    }
+    return rv;
 }
 
 PyObject *_loads_bool(const char *x, int32_t len) {
@@ -1606,6 +1628,11 @@ PyObject *_loads_from_pyobject(PyObject *x) {
 
 
 PyObject *_loads_hashable(const char *x, int32_t len) {
+
+    if ((uint32_t)len < sizeof(char)) {
+        _dispatch_errno = RES_BAD_TYPE;
+        return NULL;
+    }
 
     switch (x[0]) {
         case INT_SYMBOL:
