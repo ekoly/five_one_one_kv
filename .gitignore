@@ -161,4 +161,7 @@ cython_debug/
 
 *.swp
 *.o
+*.so
 *.ipynb
+tags
+tags.bak
